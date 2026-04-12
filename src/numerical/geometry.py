@@ -3,7 +3,7 @@ import numpy as np
 
 class TorusGeometry:
     def __init__(self, R: float = 1.0, r: float = 0.3):
-        """
+        r"""
         Differential geometry of a 2D Torus.
         Coordinates: (theta, phi)
         theta \in [0, 2pi) - Poloidal angle (around the tube)
@@ -16,7 +16,7 @@ class TorusGeometry:
         self.r = r
 
     def get_metric_elements(self, theta: torch.Tensor):
-        """
+        r"""
         Returns the non-zero components of the metric tensor: g_{\theta\theta} and g_{\phi\phi}
         """
         g_tt = torch.full_like(theta, self.r**2)
@@ -24,21 +24,21 @@ class TorusGeometry:
         return g_tt, g_pp
 
     def get_inverse_metric_elements(self, theta: torch.Tensor):
-        """
+        r"""
         Returns g^{\theta\theta} and g^{\phi\phi}
         """
         g_tt, g_pp = self.get_metric_elements(theta)
         return 1.0 / g_tt, 1.0 / g_pp
 
     def get_sqrt_det_g(self, theta: torch.Tensor):
-        """
+        r"""
         Returns \sqrt{|g|} = r(R + r \cos\theta)
         """
         return self.r * (self.R + self.r * torch.cos(theta))
 
 
 def compute_gradient(f, dtheta: float, dphi: float):
-    """
+    r"""
     Computes \nabla f = [ \partial_\theta f, \partial_\phi f ] 
     using 4th-order central differences with periodic boundaries.
     f shape: (Batch, Channels, N_theta, N_phi)
@@ -57,7 +57,7 @@ def compute_gradient(f, dtheta: float, dphi: float):
 
 
 def compute_laplace_beltrami(f: torch.Tensor, geometry: TorusGeometry, dtheta: float, dphi: float):
-    """
+    r"""
     Computes \Delta_M f = \frac{1}{\sqrt{|g|}} \partial_i (\sqrt{|g|} g^{ij} \partial_j f)
     f shape: (Batch, Channels, N_theta, N_phi)
     """
