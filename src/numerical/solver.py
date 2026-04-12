@@ -121,3 +121,120 @@ class TorusWaveSolverRK4:
 
         # Stack to (Batch, Time, Channels, H, W)
         return torch.stack(history_P, dim=1), torch.stack(history_S, dim=1)
+
+class TorusSpectralSolver:
+    def __init__(self, R: float = 3.0, r: float = 1.0, c: float = 343.0, 
+                 N_theta: int = 256, N_phi: int = 256, CFL: float = 0.1):
+        """
+        Implementation of the Fourier Pseudospectral method for acoustic waves on a torus.
+        As described in acoustic-spectral.md
+        """
+        self.R = R
+        self.r = r
+        self.c = c
+        self.N_theta = N_theta
+        self.N_phi = N_phi
+        
+        self.d_theta = 2 * np.pi / N_theta
+        self.d_phi = 2 * np.pi / N_phi
+        
+        # CFL Condition: dt = CFL * min_dx / c
+        min_dx = min(r * self.d_theta, (R - r) * self.d_phi)
+        self.dt = CFL * min_dx / c
+        
+        # Wavenumbers for spectral differentiation
+        # k = [0, 1, ..., N/2-1, -N/2, ..., -1]
+        self.k_theta = torch.fft.fftfreq(N_theta).to(torch.float32) * N_theta
+        self.k_phi = torch.fft.fftfreq(N_phi).to(torch.float32) * N_phi
+        
+        self.K_THETA, self.K_PHI = torch.meshgrid(self.k_theta, self.k_phi, indexing='ij')
+
+        # Static Geometric Terms (Physical Space)
+        theta_grid = torch.linspace(0, 2*np.pi, N_theta + 1)[:-1]
+        phi_grid = torch.linspace(0, 2*np.pi, N_phi + 1)[:-1]
+        THETA, _ = torch.meshgrid(theta_grid, phi_grid, indexing='ij')
+        
+        self.THETA = THETA
+        self.g_inv_tt = 1.0 / (r**2)
+        self.g_inv_pp = 1.0 / (R + r * torch.cos(THETA))**2
+        self.gamma_term = -torch.sin(THETA) / (r * (R + r * torch.cos(THETA)))
+        self.sqrt_g = r * (R + r * torch.cos(THETA))
+
+    def compute_laplace_beltrami(self, P: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the Laplacian in spectral space.
+        """
+        device = P.device
+        # Move precomputed tensors to the correct device if needed
+        self.K_THETA = self.K_THETA.to(device)
+        self.K_PHI = self.K_PHI.to(device)
+        self.g_inv_pp = self.g_inv_pp.to(device)
+        self.gamma_term = self.gamma_term.to(device)
+        self.sqrt_g = self.sqrt_g.to(device)
+
+        # Forward FFT
+        P_hat = torch.fft.fft2(P)
+        
+        # First derivative w.r.t theta: F^-1 [ i * k_theta * P_hat ]
+        dP_dtheta_hat = 1j * self.K_THETA * P_hat
+        dP_dtheta = torch.real(torch.fft.ifft2(dP_dtheta_hat))
+        
+        # Second derivative w.r.t theta: F^-1 [ -k_theta^2 * P_hat ]
+        d2P_dtheta2_hat = -(self.K_THETA**2) * P_hat
+        d2P_dtheta2 = torch.real(torch.fft.ifft2(d2P_dtheta2_hat))
+        
+        # Second derivative w.r.t phi: F^-1 [ -k_phi^2 * P_hat ]
+        d2P_dphi2_hat = -(self.K_PHI**2) * P_hat
+        d2P_dphi2 = torch.real(torch.fft.ifft2(d2P_dphi2_hat))
+        
+        # Assemble Laplacian in physical space
+        # LB = (1/r^2) * d2P/dtheta^2 + gamma * dP/dtheta + g^pp * d2P/dphi^2
+        # Note: self.g_inv_tt is 1/r^2
+        laplace = (self.g_inv_tt * d2P_dtheta2) + \
+                  (self.gamma_term * dP_dtheta) + \
+                  (self.g_inv_pp * d2P_dphi2)
+                  
+        return laplace
+
+    def simulate(self, num_steps: int, source_fn: Optional[Callable], 
+                 device: torch.device, record_every: int = 10):
+        """
+        Explicit Leapfrog Time-Stepping as per acoustic-spectral.md
+        """
+        P_curr = torch.zeros((self.N_theta, self.N_phi), device=device)
+        P_prev = torch.zeros_like(P_curr)
+        
+        # Initial condition: can be set here or passed in
+        # For now, let's assume it's zero and relies on source
+        
+        history_P = []
+        t = 0.0
+        
+        for step in range(num_steps):
+            S_curr = source_fn(t, device) if source_fn else torch.zeros_like(P_curr)
+            # source_fn should return (N_theta, N_phi)
+            
+            # Evaluate Laplacian
+            laplacian = self.compute_laplace_beltrami(P_curr)
+            
+            # Acceleration: c^2 * (Laplacian + S)
+            accel = (self.c**2) * (laplacian + S_curr)
+            
+            # Leapfrog: P_next = 2*P_curr - P_prev + dt^2 * acceleration
+            P_next = 2 * P_curr - P_prev + (self.dt**2) * accel
+            
+            # Update state
+            P_prev = P_curr
+            P_curr = P_next
+            t += self.dt
+            
+            if step % record_every == 0:
+                history_P.append(P_curr.clone().cpu())
+                
+                if step % (num_steps//10 + 1) == 0:
+                    print(f"Spectral Sim: {100*step/num_steps:.1f}% (t={t:.4f}s)")
+                    if not torch.isfinite(P_curr).all():
+                        print("ERROR: Divergence in spectral solver!")
+                        break
+
+        return torch.stack(history_P, dim=0)
