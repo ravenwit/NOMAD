@@ -179,7 +179,7 @@ class TorusSpectralSolver:
         dphi_dist = (phi_grid - phi0 + np.pi) % (2*np.pi) - np.pi
         
         # Physical squared distance
-        r_sq = (self.r * dtheta_dist)**2 + ((self.R + self.r * torch.cos(theta0)) * dphi_dist)**2
+        r_sq = (self.r * dtheta_dist)**2 + ((self.R + self.r * np.cos(theta0)) * dphi_dist)**2
         
         r_sq_over_sigma_sq = r_sq / (sigma_s ** 2)
         spatial = (2.0 - r_sq_over_sigma_sq) * torch.exp(-r_sq / (2 * sigma_s ** 2))
