@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import h5py
 from typing import Callable, Optional, Tuple
 from .geometry import TorusGeometry, compute_laplace_beltrami
 
@@ -274,3 +275,21 @@ class TorusSpectralSolver:
         P_stack = torch.stack(history_P, dim=0).unsqueeze(0)
         S_stack = torch.stack(history_S, dim=0).unsqueeze(0)
         return P_stack, S_stack
+
+def save_simulation_to_h5(P, S, filename, R, r, dt, N_theta, N_phi):
+    """
+    Saves NOMAD simulation data to HDF5.
+    Shapes expected: P, S: (Batch, Time, Channels, H, W)
+    """
+    with h5py.File(filename, 'w') as f:
+        # Move Channels to end for storage: (B, T, C, H, W) -> (B, T, H, W, C)
+        P_save = P.permute(0, 1, 3, 4, 2).numpy()
+        S_save = S.permute(0, 1, 3, 4, 2).numpy()
+        f.create_dataset('pressure', data=P_save, compression="gzip")
+        f.create_dataset('source', data=S_save, compression="gzip")
+        f.attrs['R'] = R
+        f.attrs['r'] = r
+        f.attrs['dt'] = dt
+        f.attrs['N_theta'] = N_theta
+        f.attrs['N_phi'] = N_phi
+    print(f"Dataset successfully saved to {filename}")
