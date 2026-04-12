@@ -8,6 +8,7 @@ interface TorusVisualizerProps {
   radialSegments: number; // N_theta
   tubularSegments: number; // N_phi
   intensityMultiplier?: number;
+  isRemote?: boolean;
 }
 
 const vertexShader = `
@@ -80,7 +81,7 @@ const fragmentShader = `
 `;
 
 export const TorusVisualizer: React.FC<TorusVisualizerProps> = ({ 
-  R, r, radialSegments, tubularSegments, intensityMultiplier = 1.5 
+  R, r, radialSegments, tubularSegments, intensityMultiplier = 1.5, isRemote = false
 }) => {
   const materialRef = useRef<THREE.ShaderMaterial>(null);
   
@@ -111,6 +112,7 @@ export const TorusVisualizer: React.FC<TorusVisualizerProps> = ({
         isPointerDown={isPointerDown}
         R={R}
         r={r}
+        isRemote={isRemote}
       />
       
       <mesh 

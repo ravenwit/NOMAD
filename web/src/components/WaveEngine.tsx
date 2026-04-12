@@ -90,6 +90,7 @@ export interface WaveEngineProps {
   isPointerDown: boolean;
   R?: number;
   r?: number;
+  isRemote?: boolean;
 }
 
 export const WaveEngine: React.FC<WaveEngineProps> = ({
@@ -97,7 +98,8 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
   pointerUV,
   isPointerDown,
   R = 1.5,
-  r = 0.5
+  r = 0.5,
+  isRemote = false
 }) => {
   const { gl } = useThree();
 
@@ -161,10 +163,41 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
   }, [material, scene]);
 
   const wasPointerDown = useRef(false);
+  const fetching = useRef(false);
+
+  // Function to sync state from Python Spectral Solver
+  const syncWithPython = async () => {
+    if (fetching.current || !pointerUV) return;
+    fetching.current = true;
+    try {
+      const resp = await fetch(`http://localhost:8000/simulate?theta0=${pointerUV.y * 2 * Math.PI}&phi0=${pointerUV.x * 2 * Math.PI}&steps=100`);
+      const buffer = await resp.arrayBuffer();
+      const data = new Float32Array(buffer);
+      
+      const { curr } = rtPointers.current;
+      gl.utils.getTextureUtils().setImageData(curr.texture, data);
+      curr.texture.needsUpdate = true;
+    } catch (e) {
+      console.error("Failed to sync with Python solver:", e);
+    } finally {
+      fetching.current = false;
+    }
+  };
 
   // Execute Simulation Step on every frame
   useFrame(() => {
-    // 1. Update Source Term (Raycast hit coordinates)
+    const { prev, curr, next } = rtPointers.current;
+
+    // IF REMOTE: We rely on Python to provide the field state
+    if (isRemote) {
+        if (isPointerDown && !wasPointerDown.current) {
+            syncWithPython();
+        }
+        onOutputTextureReady(curr.texture);
+        wasPointerDown.current = isPointerDown;
+        return;
+    }
+
     // 1. Update Source Term (Raycast hit coordinates)
     if (isPointerDown || wasPointerDown.current) {
       const srcData = sourceTexture.image.data as unknown as Float32Array;
@@ -172,13 +205,10 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
 
       if (isPointerDown && pointerUV) {
         // Create a zero-mean Mexican Hat (Ricker wavelet) pulse 
-        // This injects perfectly conserved energy (0 net volume) to prevent baseline drift on a lossless manifold
         const u_idx = Math.floor(pointerUV.x * W);
         const v_idx = Math.floor(pointerUV.y * H);
         const radius = 6;
         const sigma = 2.0;
-
-        // Impulse strength (needs to be large because it's multiplied by dt^2 in the shader)
         const impulse = 10000.0;
 
         let sum = 0.0;
@@ -188,7 +218,6 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
           for (let i = -radius; i <= radius; i++) {
             const distSq = i * i + j * j;
             if (distSq <= radius * radius) {
-              // 2D Mexican Hat (Laplacian of Gaussian): (2 - r^2 / sigma^2) * exp(-r^2 / 2*sigma^2)
               const r_sq_over_sigma_sq = distSq / (sigma * sigma);
               const value = (2.0 - r_sq_over_sigma_sq) * Math.exp(-distSq / (2.0 * sigma * sigma));
               weights.push({ i, j, value });
@@ -197,8 +226,6 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
           }
         }
 
-        // Strongly enforce exactly zero mathematical sum across the discrete sampled grid
-        // to prevent any residual floating point pressure drift on the perfectly lossless manifold
         const correction = sum / weights.length;
 
         for (const w of weights) {
@@ -210,8 +237,6 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
       sourceTexture.needsUpdate = true;
     }
     wasPointerDown.current = isPointerDown;
-
-    const { prev, curr, next } = rtPointers.current;
 
     // 2. Setup uniform state for Shader computation
     material.uniforms.texCurr.value = curr.texture;
@@ -234,5 +259,5 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
     };
   });
 
-  return null; // This is a logic/compute component, renders nothing directly to main DOM/Canvas
+  return null;
 };
