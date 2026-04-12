@@ -164,19 +164,33 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
 
   const wasPointerDown = useRef(false);
   const fetching = useRef(false);
+  const remoteClickQueue = useRef<{theta: number, phi: number} | null>(null);
+
+  // Dedicated data texture to hold the frames from Python
+  const pythonTexture = useMemo(() => {
+    const tex = new THREE.DataTexture(new Float32Array(W * H), W, H, THREE.RedFormat, THREE.FloatType);
+    tex.needsUpdate = true;
+    return tex;
+  }, []);
 
   // Function to sync state from Python Spectral Solver
   const syncWithPython = async () => {
-    if (fetching.current || !pointerUV) return;
+    if (fetching.current) return;
     fetching.current = true;
     try {
-      const resp = await fetch(`http://localhost:8000/simulate?theta0=${pointerUV.y * 2 * Math.PI}&phi0=${pointerUV.x * 2 * Math.PI}&steps=100`);
+      let url = `http://localhost:8000/step?steps=10`;
+      if (remoteClickQueue.current) {
+        url += `&theta0=${remoteClickQueue.current.theta}&phi0=${remoteClickQueue.current.phi}`;
+        remoteClickQueue.current = null;
+      }
+
+      const resp = await fetch(url);
       const buffer = await resp.arrayBuffer();
       const data = new Float32Array(buffer);
       
-      const { curr } = rtPointers.current;
-      gl.utils.getTextureUtils().setImageData(curr.texture, data);
-      curr.texture.needsUpdate = true;
+      const pyData = pythonTexture.image.data as Float32Array;
+      pyData.set(data);
+      pythonTexture.needsUpdate = true;
     } catch (e) {
       console.error("Failed to sync with Python solver:", e);
     } finally {
@@ -184,16 +198,23 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
     }
   };
 
+
   // Execute Simulation Step on every frame
   useFrame(() => {
     const { prev, curr, next } = rtPointers.current;
 
-    // IF REMOTE: We rely on Python to provide the field state
+    // IF REMOTE: We continuously poll Python to provide the field state
     if (isRemote) {
-        if (isPointerDown && !wasPointerDown.current) {
+        if (isPointerDown && !wasPointerDown.current && pointerUV) {
+            remoteClickQueue.current = {
+                theta: pointerUV.y * 2 * Math.PI,
+                phi: pointerUV.x * 2 * Math.PI
+            };
+        }
+        if (!fetching.current) {
             syncWithPython();
         }
-        onOutputTextureReady(curr.texture);
+        onOutputTextureReady(pythonTexture);
         wasPointerDown.current = isPointerDown;
         return;
     }
