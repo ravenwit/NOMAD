@@ -2,9 +2,11 @@ import { useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Stars, Stats } from '@react-three/drei';
 import { TorusVisualizer } from './components/TorusVisualizer';
+import { SolverMode } from './components/WaveEngine';
 
 function App() {
-  const [isRemote, setIsRemote] = useState(false);
+  const [solverMode, setSolverMode] = useState<SolverMode>('webgl');
+  const [resetTrigger, setResetTrigger] = useState(0);
 
   return (
     <div className="w-screen h-screen bg-black flex flex-col font-sans">
@@ -16,19 +18,34 @@ function App() {
           Real-time visualization of the 2D Acoustic Wave Equation explicitly mapped onto a Toroidal manifold using a custom Laplace-Beltrami geometric shader.
         </p>
         
-        <div className="mt-8 pointer-events-auto flex items-center gap-3 bg-zinc-900/50 backdrop-blur-md p-3 rounded-lg border border-zinc-700 w-fit">
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input 
-              type="checkbox" 
-              className="sr-only peer" 
-              checked={isRemote}
-              onChange={() => setIsRemote(!isRemote)}
-            />
-            <div className="w-11 h-6 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-            <span className="ml-3 text-sm font-medium text-zinc-200">
-              Remote Spectral Solver (Python)
-            </span>
-          </label>
+        <div className="mt-8 pointer-events-auto flex gap-2 items-center">
+          <div className="flex gap-2 bg-zinc-900/50 backdrop-blur-md p-1 rounded-lg border border-zinc-800 w-fit">
+            <button 
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${solverMode === 'webgl' ? 'bg-blue-600 text-white shadow-lg' : 'text-zinc-400 hover:text-white hover:bg-zinc-800/50'}`}
+              onClick={() => setSolverMode('webgl')}
+            >
+              FDTD (WebGL)
+            </button>
+            <button 
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${solverMode === 'local_spectral' ? 'bg-blue-600 text-white shadow-lg' : 'text-zinc-400 hover:text-white hover:bg-zinc-800/50'}`}
+              onClick={() => setSolverMode('local_spectral')}
+            >
+              Spectral (JS Native)
+            </button>
+            <button 
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${solverMode === 'remote_spectral' ? 'bg-blue-600 text-white shadow-lg' : 'text-zinc-400 hover:text-white hover:bg-zinc-800/50'}`}
+              onClick={() => setSolverMode('remote_spectral')}
+            >
+              Spectral (Python GPU)
+            </button>
+          </div>
+          
+          <button 
+            className="px-4 py-2 bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30 rounded-lg backdrop-blur-md text-sm font-medium transition-all shadow-lg ml-4"
+            onClick={() => setResetTrigger(r => r + 1)}
+          >
+            Reset Field
+          </button>
         </div>
       </div>
 
@@ -41,12 +58,13 @@ function App() {
           <TorusVisualizer 
             R={1.5} r={0.5} 
             radialSegments={128} tubularSegments={128} 
-            isRemote={isRemote}
+            solverMode={solverMode}
+            resetTrigger={resetTrigger}
           />
           
           <OrbitControls 
             enablePan={false}
-            autoRotate={!isRemote}
+            autoRotate={solverMode === 'webgl'}
             autoRotateSpeed={0.5}
             maxDistance={10}
             minDistance={2}
@@ -57,11 +75,11 @@ function App() {
       
       <div className="p-4 bg-zinc-900/80 backdrop-blur border-t border-zinc-800 flex justify-between items-center text-sm text-zinc-400">
         <div>
-          <span className="font-semibold text-zinc-200">Phase 1:</span> {isRemote ? 'G-Deep Spectral (Python)' : 'WebGL-Harmonized FDTD'}
+          <span className="font-semibold text-zinc-200">Mode:</span> {solverMode === 'webgl' ? 'WebGL-Harmonized FDTD' : solverMode === 'local_spectral' ? 'TypeScript Spectral (FFT)' : 'Python GPU Spectral (FFT)'}
         </div>
         <div className="flex gap-4">
-          <span>Grid: 128x128</span>
-          <span>Integrator: {isRemote ? 'Python-Spectral' : 'Shader Harmonized'}</span>
+          <span>Grid: 256x256</span>
+          <span>Integrator: {solverMode === 'webgl' ? 'Shader Harmonized Leapfrog' : solverMode === 'local_spectral' ? 'JS Native Spectral Math' : 'Torch Accelerated Spectral'}</span>
           <span>Metric: g_tt, g_pp</span>
         </div>
       </div>

@@ -25,30 +25,34 @@ class TorusWaveSolverRK4:
         self.dt = CFL * min_dx / c
         print(f"Initialized TorusSolver: Grid {N_theta}x{N_phi}. Required dt: {self.dt:.6f}")
 
-    def generate_gaussian_pulse(self, t: float, t0: float, sigma_t: float, 
-                                theta0: float, phi0: float, sigma_s: float, 
-                                amplitude: torch.Tensor, device: torch.device):
+    def generate_ricker_pulse(self, t: float, t0: float, sigma_t: float, 
+                             theta0: float, phi0: float, sigma_s: float, 
+                             amplitude: torch.Tensor, device: torch.device):
         """
-        A pure Gaussian source pulse mimicking an acoustic impact or speaker.
+        A zero-mean Ricker Wavelet (Mexican Hat) source pulse.
         """
         theta_1d = torch.linspace(0, 2*np.pi, self.N_theta + 1, device=device)[:-1]
         phi_1d = torch.linspace(0, 2*np.pi, self.N_phi + 1, device=device)[:-1]
         
         theta_grid, phi_grid = torch.meshgrid(theta_1d, phi_1d, indexing='ij')
         
-        # Geodesic-approximate spatial decay
         dtheta_dist = (theta_grid - theta0 + np.pi) % (2*np.pi) - np.pi
         dphi_dist = (phi_grid - phi0 + np.pi) % (2*np.pi) - np.pi
         
-        # Physical distances using base radii
-        phys_dist_sq = (self.geom.r * dtheta_dist)**2 + ((self.geom.R + self.geom.r * np.cos(theta0)) * dphi_dist)**2
+        # Physical squared distance
+        r_sq = (self.geom.r * dtheta_dist)**2 + ((self.geom.R + self.geom.r * np.cos(theta0)) * dphi_dist)**2
         
-        spatial = torch.exp(-phys_dist_sq / (2 * sigma_s**2))
+        # Ricker Wavelet: (1 - r^2/sigma^2) * exp(-r^2/(2*sigma^2))
+        r_sq_over_sigma_sq = r_sq / (sigma_s ** 2)
+        spatial = (2.0 - r_sq_over_sigma_sq) * torch.exp(-r_sq / (2 * sigma_s ** 2))
+        
+        # Subtract mean to ensure zero-mean (Mexican Hat filter)
+        spatial = spatial - spatial.mean()
+        
         temporal = np.exp(-(t - t0)**2 / (2 * sigma_t**2))
         
-        S_base = spatial * temporal
-        S = S_base.unsqueeze(-1) * amplitude
-        # Add batch dim and format to (B, C, H, W)
+        S = spatial * temporal
+        S = S.unsqueeze(-1) * amplitude
         S = S.unsqueeze(0).permute(0, 3, 1, 2)
         return S
 
@@ -160,6 +164,37 @@ class TorusSpectralSolver:
         self.gamma_term = -torch.sin(THETA) / (r * (R + r * torch.cos(THETA)))
         self.sqrt_g = r * (R + r * torch.cos(THETA))
 
+    def generate_ricker_pulse(self, t: float, t0: float, sigma_t: float, 
+                             theta0: float, phi0: float, sigma_s: float, 
+                             amplitude: torch.Tensor, device: torch.device):
+        """
+        Generate a zero-mean Ricker Wavelet (Mexican Hat) source pulse in 2D.
+        """
+        theta_1d = torch.linspace(0, 2*np.pi, self.N_theta + 1, device=device)[:-1]
+        phi_1d = torch.linspace(0, 2*np.pi, self.N_phi + 1, device=device)[:-1]
+        
+        theta_grid, phi_grid = torch.meshgrid(theta_1d, phi_1d, indexing='ij')
+        
+        dtheta_dist = (theta_grid - theta0 + np.pi) % (2*np.pi) - np.pi
+        dphi_dist = (phi_grid - phi0 + np.pi) % (2*np.pi) - np.pi
+        
+        # Physical squared distance
+        r_sq = (self.r * dtheta_dist)**2 + ((self.R + self.r * torch.cos(theta0)) * dphi_dist)**2
+        
+        r_sq_over_sigma_sq = r_sq / (sigma_s ** 2)
+        spatial = (2.0 - r_sq_over_sigma_sq) * torch.exp(-r_sq / (2 * sigma_s ** 2))
+        spatial = spatial - spatial.mean()
+        
+        temporal = np.exp(-(t - t0)**2 / (2 * sigma_t**2))
+        
+        # S base shape: (N_theta, N_phi)
+        S_base = spatial * temporal
+        
+        # Expand based on amplitude (C, H, W)
+        # amplitude shape: (C,)
+        S = S_base.unsqueeze(0) * amplitude.view(-1, 1, 1)
+        return S # (C, H, W)
+
     def compute_laplace_beltrami(self, P: torch.Tensor) -> torch.Tensor:
         """
         Computes the Laplacian in spectral space.
@@ -197,22 +232,19 @@ class TorusSpectralSolver:
         return laplace
 
     def simulate(self, num_steps: int, source_fn: Optional[Callable], 
-                 device: torch.device, record_every: int = 10):
+                 device: torch.device, record_every: int = 10, channels: int = 3):
         """
         Explicit Leapfrog Time-Stepping as per acoustic-spectral.md
         """
-        P_curr = torch.zeros((self.N_theta, self.N_phi), device=device)
+        P_curr = torch.zeros((channels, self.N_theta, self.N_phi), device=device)
         P_prev = torch.zeros_like(P_curr)
         
-        # Initial condition: can be set here or passed in
-        # For now, let's assume it's zero and relies on source
-        
         history_P = []
+        history_S = []
         t = 0.0
         
         for step in range(num_steps):
             S_curr = source_fn(t, device) if source_fn else torch.zeros_like(P_curr)
-            # source_fn should return (N_theta, N_phi)
             
             # Evaluate Laplacian
             laplacian = self.compute_laplace_beltrami(P_curr)
@@ -230,11 +262,15 @@ class TorusSpectralSolver:
             
             if step % record_every == 0:
                 history_P.append(P_curr.clone().cpu())
+                history_S.append(S_curr.clone().cpu())
                 
-                if step % (num_steps//10 + 1) == 0:
+                if step % (max(1, num_steps//10)) == 0:
                     print(f"Spectral Sim: {100*step/num_steps:.1f}% (t={t:.4f}s)")
                     if not torch.isfinite(P_curr).all():
                         print("ERROR: Divergence in spectral solver!")
                         break
 
-        return torch.stack(history_P, dim=0)
+        # Return (Batch=1, Time, Channels, H, W) to match the expected deep learning dataset shape
+        P_stack = torch.stack(history_P, dim=0).unsqueeze(0)
+        S_stack = torch.stack(history_S, dim=0).unsqueeze(0)
+        return P_stack, S_stack

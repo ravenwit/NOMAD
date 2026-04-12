@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
-import { WaveEngine } from './WaveEngine';
+import { WaveEngine, SolverMode } from './WaveEngine';
 
 interface TorusVisualizerProps {
   R: number;
@@ -8,7 +8,8 @@ interface TorusVisualizerProps {
   radialSegments: number; // N_theta
   tubularSegments: number; // N_phi
   intensityMultiplier?: number;
-  isRemote?: boolean;
+  solverMode?: SolverMode;
+  resetTrigger?: number;
 }
 
 const vertexShader = `
@@ -81,7 +82,7 @@ const fragmentShader = `
 `;
 
 export const TorusVisualizer: React.FC<TorusVisualizerProps> = ({ 
-  R, r, radialSegments, tubularSegments, intensityMultiplier = 1.5, isRemote = false
+  R, r, radialSegments, tubularSegments, intensityMultiplier = 1.5, solverMode = 'webgl', resetTrigger = 0
 }) => {
   const materialRef = useRef<THREE.ShaderMaterial>(null);
   
@@ -112,7 +113,8 @@ export const TorusVisualizer: React.FC<TorusVisualizerProps> = ({
         isPointerDown={isPointerDown}
         R={R}
         r={r}
-        isRemote={isRemote}
+        solverMode={solverMode}
+        resetTrigger={resetTrigger}
       />
       
       <mesh 

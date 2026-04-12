@@ -84,13 +84,16 @@ void main() {
 }
 `;
 
+export type SolverMode = 'webgl' | 'local_spectral' | 'remote_spectral';
+
 export interface WaveEngineProps {
   onOutputTextureReady: (tex: THREE.Texture) => void;
   pointerUV: THREE.Vector2 | null;
   isPointerDown: boolean;
   R?: number;
   r?: number;
-  isRemote?: boolean;
+  solverMode?: SolverMode;
+  resetTrigger?: number; // Whenever this increments, we reset the active solver
 }
 
 export const WaveEngine: React.FC<WaveEngineProps> = ({
@@ -99,8 +102,10 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
   isPointerDown,
   R = 1.5,
   r = 0.5,
-  isRemote = false
+  solverMode = 'webgl',
+  resetTrigger = 0
 }) => {
+
   const { gl } = useThree();
 
   // Create ping-pong FBOs (with internal float format for math limits)
@@ -166,8 +171,56 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
   const fetching = useRef(false);
   const remoteClickQueue = useRef<{theta: number, phi: number} | null>(null);
 
-  // Dedicated data texture to hold the frames from Python
-  const pythonTexture = useMemo(() => {
+  const workerRef = useRef<Worker | null>(null);
+  const workerBusy = useRef(false);
+
+  useEffect(() => {
+    // Initialize WebWorker (Vite pattern)
+    const worker = new Worker(new URL('../numerical/WaveWorker.ts', import.meta.url), { type: 'module' });
+    workerRef.current = worker;
+
+    worker.postMessage({ 
+        type: 'init', 
+        R, r, width: W, height: H, c: 1.0, CFL: 0.1 
+    });
+
+    worker.onmessage = (e) => {
+        if (e.data.type === 'frame') {
+            const data = e.data.data as Float32Array;
+            const hostData = hostTexture.image.data as unknown as Float32Array;
+            hostData.set(data);
+            hostTexture.needsUpdate = true;
+            workerBusy.current = false;
+        }
+    };
+
+    return () => {
+        worker.terminate();
+    };
+  }, [R, r]);
+
+  // Handle simulation resetting triggered from outside
+  useEffect(() => {
+    if (resetTrigger > 0) {
+      if (solverMode === 'webgl') {
+        const { prev, curr, next } = rtPointers.current;
+        const currentTarget = gl.getRenderTarget();
+        [prev, curr, next].forEach(rt => {
+          gl.setRenderTarget(rt);
+          gl.clear();
+        });
+        gl.setRenderTarget(currentTarget);
+      } else if (solverMode === 'local_spectral') {
+        workerRef.current?.postMessage({ type: 'reset' });
+      } else if (solverMode === 'remote_spectral') {
+        fetch('http://localhost:8000/reset').catch(e => console.error("Failed to call remote reset:", e));
+      }
+    }
+  }, [resetTrigger, solverMode, gl, targets]);
+
+  
+  // Dedicated data texture to hold the frames from Python / Local TS
+  const hostTexture = useMemo(() => {
     const tex = new THREE.DataTexture(new Float32Array(W * H), W, H, THREE.RedFormat, THREE.FloatType);
     tex.needsUpdate = true;
     return tex;
@@ -188,9 +241,9 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
       const buffer = await resp.arrayBuffer();
       const data = new Float32Array(buffer);
       
-      const pyData = pythonTexture.image.data as Float32Array;
-      pyData.set(data);
-      pythonTexture.needsUpdate = true;
+      const hostData = hostTexture.image.data as unknown as Float32Array;
+      hostData.set(data);
+      hostTexture.needsUpdate = true;
     } catch (e) {
       console.error("Failed to sync with Python solver:", e);
     } finally {
@@ -198,13 +251,12 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
     }
   };
 
-
   // Execute Simulation Step on every frame
   useFrame(() => {
     const { prev, curr, next } = rtPointers.current;
 
-    // IF REMOTE: We continuously poll Python to provide the field state
-    if (isRemote) {
+    // REMOTE SPECTRAL: We continuously poll Python to provide the field state
+    if (solverMode === 'remote_spectral') {
         if (isPointerDown && !wasPointerDown.current && pointerUV) {
             remoteClickQueue.current = {
                 theta: pointerUV.y * 2 * Math.PI,
@@ -214,10 +266,32 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
         if (!fetching.current) {
             syncWithPython();
         }
-        onOutputTextureReady(pythonTexture);
+        onOutputTextureReady(hostTexture);
         wasPointerDown.current = isPointerDown;
         return;
     }
+
+    // LOCAL SPECTRAL: We compute the spectral FFT physics in a background WebWorker 
+    if (solverMode === 'local_spectral') {
+        if (isPointerDown && !wasPointerDown.current && pointerUV) {
+            workerRef.current?.postMessage({
+                type: 'pulse',
+                theta0: pointerUV.y * 2 * Math.PI,
+                phi0: pointerUV.x * 2 * Math.PI,
+                impulse: 10000.0
+            });
+        }
+        
+        if (workerRef.current && !workerBusy.current) {
+            workerBusy.current = true;
+            workerRef.current.postMessage({ type: 'step', steps: 1 });
+        }
+
+        onOutputTextureReady(hostTexture);
+        wasPointerDown.current = isPointerDown;
+        return;
+    }
+
 
     // 1. Update Source Term (Raycast hit coordinates)
     if (isPointerDown || wasPointerDown.current) {
