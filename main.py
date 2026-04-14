@@ -1,12 +1,12 @@
 import argparse
 import torch
 
-from src.simulator import TorusAcousticSimulator
-from src.models import AutoregressiveGenerator, Discriminator, SINDyAutoencoder
-from src.train import PhysicsInformedTrainer, TorusWaveDataset
+from src.numerical.solver import TorusAcousticSimulator
+from src.models.pinn import PINN
+from src.data.dataset import TorusWaveDataset
+from src.training.trainer import PhysicsInformedTrainer
 from torch.utils.data import DataLoader
-from src.geometry import TorusGeometry
-from src.discovery import discover_pde
+from src.numerical.geometry import TorusGeometry
 
 def main():
     parser = argparse.ArgumentParser(description="Acoustic Wave Torus Geometric Deep Learning Framework")
@@ -32,9 +32,8 @@ def main():
         simulator.save_to_h5(P_seq, S_seq, "torus_simulation.h5")
         
     elif args.mode == 'train-gan':
-        print("Initializing Physics-Informed GAN Training...")
-        generator = AutoregressiveGenerator(input_channels=3).to(device)
-        discriminator = Discriminator(input_channels=3).to(device)
+        print("Initializing Physics-Informed Neural Network Training...")
+        model = PINN(hidden_dim=32).to(device)
         
         # Load Dataset
         try:
@@ -45,12 +44,12 @@ def main():
             print("Error: simulation_data.h5 not found. Run --mode simulate first.")
             return
 
-        trainer = PhysicsInformedTrainer(generator, discriminator, R=1.0, r=0.3, c=1.0)
+        trainer = PhysicsInformedTrainer(model, R=1.0, r=0.3, c=1.0)
         trainer.train_epochs(dataloader, epochs=10)
         
         # Save trained weights
-        torch.save(generator.state_dict(), "generator_weights.pth")
-        print("Training complete. Weights saved to generator_weights.pth")
+        torch.save(model.state_dict(), "pinn_weights.pth")
+        print("Training complete. Weights saved to pinn_weights.pth")
         
     elif args.mode == 'discover':
         print("Initializing Symbolic PDE Discovery...")
@@ -63,10 +62,22 @@ def main():
         print(f"Discovery Result: {result}")
         
     elif args.mode == 'export-onnx':
-        print("Exporting AutoregressiveGenerator to ONNX...")
-        generator = AutoregressiveGenerator(input_channels=3).to(device)
-        # Note: Load your trained weights via generator.load_state_dict(...) before exporting in production!
-        generator.export_to_onnx("acoustic_torus.onnx", device=device)
+        print("Exporting PINN to ONNX...")
+        model = PINN(hidden_dim=32).to(device)
+        try:
+            model.load_state_dict(torch.load("pinn_weights.pth", map_location=device))
+            print("Loaded trained weights from pinn_weights.pth")
+        except FileNotFoundError:
+            print("Warning: pinn_weights.pth not found. Exporting model with random weights.")
+        
+        # ONNX Export for PINN
+        model.eval()
+        dummy_input = torch.randn(1, 2, 64, 64).to(device)
+        torch.onnx.export(model, dummy_input, "acoustic_torus_pinn.onnx", 
+                          export_params=True, opset_version=11, 
+                          do_constant_folding=True, input_names=['input'], 
+                          output_names=['output'])
+        print("Exported ONNX model to acoustic_torus_pinn.onnx")
 
 if __name__ == "__main__":
     main()

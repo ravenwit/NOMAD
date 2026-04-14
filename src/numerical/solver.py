@@ -276,6 +276,23 @@ class TorusSpectralSolver:
         S_stack = torch.stack(history_S, dim=0).unsqueeze(0)
         return P_stack, S_stack
 
+class TorusAcousticSimulator:
+    def __init__(self, R=3.0, r=1.0, c=343.0, N_theta=128, N_phi=128, dt=0.001):
+        self.solver = TorusSpectralSolver(R, r, c, N_theta, N_phi, CFL=0.1)
+        # Use solver's dt if we want strictly CFL-safe, or override
+        self.dt = dt if dt else self.solver.dt
+        self.solver.dt = self.dt
+        
+    def generate_gaussian_source(self, t, t0=0.05, sigma_t=0.01, theta0=np.pi, phi0=np.pi, sigma_s=0.5, amplitude=None, device='cpu'):
+        if amplitude is None: amplitude = torch.tensor([1.0], device=device)
+        return self.solver.generate_ricker_pulse(t, t0, sigma_t, theta0, phi0, sigma_s, amplitude, device)
+
+    def simulate(self, num_steps=500, source_generator_fn=None, device='cpu', record_every=10):
+        return self.solver.simulate(num_steps, source_generator_fn, device, record_every)
+
+    def save_to_h5(self, P, S, filename):
+        save_simulation_to_h5(P, S, filename, self.solver.R, self.solver.r, self.solver.dt, self.solver.N_theta, self.solver.N_phi)
+
 def save_simulation_to_h5(P, S, filename, R, r, dt, N_theta, N_phi):
     """
     Saves NOMAD simulation data to HDF5.
