@@ -25,12 +25,12 @@ def generate_multi_rollout_dataset(filename, num_rollouts=10, steps_per_rollout=
         sigma_s = np.random.uniform(0.3, 0.8)
         
         def random_source_fn(t, dev):
-            return simulator.generate_gaussian_source(
+            return simulator.generate_kicker_pulse(
                 t, t0=t0, sigma_t=0.01, theta0=theta0, phi0=phi0, 
                 sigma_s=sigma_s, amplitude=torch.tensor([1.0], device=dev), device=dev
             )
             
-        P_seq, S_seq = simulator.simulate(num_steps=steps_per_rollout, source_generator_fn=random_source_fn, device=device, record_every=record_every)
+        P_seq, S_seq = simulator.simulate(num_steps=steps_per_rollout, source_generator_fn=random_source_fn, device=device, record_every=record_every, channels=1)
         P_list.append(P_seq)
         S_list.append(S_seq)
         

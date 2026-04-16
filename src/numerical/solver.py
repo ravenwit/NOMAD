@@ -284,8 +284,16 @@ class TorusAcousticSimulator:
         self.solver.dt = self.dt
         
     def generate_gaussian_source(self, t, t0=0.05, sigma_t=0.01, theta0=np.pi, phi0=np.pi, sigma_s=0.5, amplitude=None, device='cpu'):
+        """Deprecated: use generate_ricker_pulse instead."""
+        return self.generate_ricker_pulse(t, t0, sigma_t, theta0, phi0, sigma_s, amplitude, device)
+
+    def generate_ricker_pulse(self, t, t0=0.05, sigma_t=0.01, theta0=np.pi, phi0=np.pi, sigma_s=0.5, amplitude=None, device='cpu'):
         if amplitude is None: amplitude = torch.tensor([1.0], device=device)
         return self.solver.generate_ricker_pulse(t, t0, sigma_t, theta0, phi0, sigma_s, amplitude, device)
+
+    def generate_kicker_pulse(self, t, t0=0.05, sigma_t=0.01, theta0=np.pi, phi0=np.pi, sigma_s=0.5, amplitude=None, device='cpu'):
+        """Alias for generate_ricker_pulse."""
+        return self.generate_ricker_pulse(t, t0, sigma_t, theta0, phi0, sigma_s, amplitude, device)
 
     def simulate(self, num_steps=500, source_generator_fn=None, device='cpu', record_every=10):
         return self.solver.simulate(num_steps, source_generator_fn, device, record_every)
