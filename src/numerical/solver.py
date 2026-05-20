@@ -277,7 +277,7 @@ class TorusSpectralSolver:
         return P_stack, S_stack
 
 class TorusAcousticSimulator:
-    def __init__(self, R=3.0, r=1.0, c=343.0, N_theta=128, N_phi=128, dt=0.001):
+    def __init__(self, R=3.0, r=1.0, c=343.0, N_theta=128, N_phi=128, dt=None):
         self.solver = TorusSpectralSolver(R, r, c, N_theta, N_phi, CFL=0.1)
         # Use solver's dt if we want strictly CFL-safe, or override
         self.dt = dt if dt else self.solver.dt
