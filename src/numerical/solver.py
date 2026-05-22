@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import h5py
 from typing import Callable, Optional, Tuple
-from .geometry import TorusGeometry, compute_laplace_beltrami
+from .geometry import TorusGeometry
 
 class TorusWaveSolverRK4:
     def __init__(self, R: float = 1.0, r: float = 0.3, c: float = 1.0, 

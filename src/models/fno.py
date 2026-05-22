@@ -8,6 +8,7 @@ class SpectralConv2d(nn.Module):
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.modes1 = modes1
+        
         self.modes2 = modes2
 
         self.scale = (1 / (in_channels * out_channels))
