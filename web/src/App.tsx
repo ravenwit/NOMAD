@@ -3,10 +3,12 @@ import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Stars, Stats } from '@react-three/drei';
 import { TorusVisualizer } from './components/TorusVisualizer';
 import { SolverMode } from './components/WaveEngine';
+import { PerformanceBadge } from './components/PerformanceBadge';
 
 function App() {
   const [solverMode, setSolverMode] = useState<SolverMode>('webgl');
   const [resetTrigger, setResetTrigger] = useState(0);
+  const [inferenceTime, setInferenceTime] = useState<number>(0);
 
   return (
     <div className="w-screen h-screen bg-black flex flex-col font-sans">
@@ -38,6 +40,12 @@ function App() {
             >
               Spectral (Python GPU)
             </button>
+            <button 
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${solverMode === 'neural_operator' ? 'bg-violet-600 text-white shadow-lg shadow-violet-600/30' : 'text-zinc-400 hover:text-white hover:bg-zinc-800/50'}`}
+              onClick={() => setSolverMode('neural_operator')}
+            >
+              Neural FNO (ONNX)
+            </button>
           </div>
           
           <button 
@@ -60,6 +68,7 @@ function App() {
             radialSegments={128} tubularSegments={128} 
             solverMode={solverMode}
             resetTrigger={resetTrigger}
+            onInferenceTime={setInferenceTime}
           />
           
           <OrbitControls 
@@ -71,15 +80,16 @@ function App() {
           />
           <Stats />
         </Canvas>
+        <PerformanceBadge inferenceMs={inferenceTime} visible={solverMode === 'neural_operator'} />
       </div>
       
       <div className="p-4 bg-zinc-900/80 backdrop-blur border-t border-zinc-800 flex justify-between items-center text-sm text-zinc-400">
         <div>
-          <span className="font-semibold text-zinc-200">Mode:</span> {solverMode === 'webgl' ? 'WebGL-Harmonized FDTD' : solverMode === 'local_spectral' ? 'TypeScript Spectral (FFT)' : 'Python GPU Spectral (FFT)'}
+          <span className="font-semibold text-zinc-200">Mode:</span> {solverMode === 'webgl' ? 'WebGL-Harmonized FDTD' : solverMode === 'local_spectral' ? 'TypeScript Spectral (FFT)' : solverMode === 'remote_spectral' ? 'Python GPU Spectral (FFT)' : 'Neural Operator PeriodicUNet (ONNX Runtime Web)'}
         </div>
         <div className="flex gap-4">
-          <span>Grid: 256x256</span>
-          <span>Integrator: {solverMode === 'webgl' ? 'Shader Harmonized Leapfrog' : solverMode === 'local_spectral' ? 'JS Native Spectral Math' : 'Torch Accelerated Spectral'}</span>
+          <span>Grid: {solverMode === 'neural_operator' ? '64×64 → 256×256 (upsampled)' : '256x256'}</span>
+          <span>Integrator: {solverMode === 'webgl' ? 'Shader Harmonized Leapfrog' : solverMode === 'local_spectral' ? 'JS Native Spectral Math' : solverMode === 'remote_spectral' ? 'Torch Accelerated Spectral' : 'Autoregressive Neural Rollout'}</span>
           <span>Metric: g_tt, g_pp</span>
         </div>
       </div>

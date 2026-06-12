@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useEffect } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
+import { NeuralInference } from '../numerical/NeuralInference';
 
 const W = 256; // Grid resolution
 const H = 256;
@@ -84,7 +85,7 @@ void main() {
 }
 `;
 
-export type SolverMode = 'webgl' | 'local_spectral' | 'remote_spectral';
+export type SolverMode = 'webgl' | 'local_spectral' | 'remote_spectral' | 'neural_operator';
 
 export interface WaveEngineProps {
   onOutputTextureReady: (tex: THREE.Texture) => void;
@@ -94,6 +95,7 @@ export interface WaveEngineProps {
   r?: number;
   solverMode?: SolverMode;
   resetTrigger?: number; // Whenever this increments, we reset the active solver
+  onInferenceTime?: (ms: number) => void;
 }
 
 export const WaveEngine: React.FC<WaveEngineProps> = ({
@@ -103,7 +105,8 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
   R = 1.5,
   r = 0.5,
   solverMode = 'webgl',
-  resetTrigger = 0
+  resetTrigger = 0,
+  onInferenceTime
 }) => {
 
   const { gl } = useThree();
@@ -171,6 +174,11 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
   const fetching = useRef(false);
   const remoteClickQueue = useRef<{theta: number, phi: number} | null>(null);
 
+  // Neural Operator (ONNX) state
+  const neuralRef = useRef<NeuralInference | null>(null);
+  const neuralBusy = useRef(false);
+  const neuralSourceRef = useRef<Float32Array | null>(null);
+
   const workerRef = useRef<Worker | null>(null);
   const workerBusy = useRef(false);
 
@@ -199,6 +207,17 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
     };
   }, [R, r]);
 
+  // Initialize NeuralInference on mount
+  useEffect(() => {
+    const neural = new NeuralInference();
+    neuralRef.current = neural;
+    neural.init('/toroidal_operator_net.onnx', '/norm_stats.json').then(() => {
+      console.log('[WaveEngine] NeuralInference ready');
+    }).catch((e) => {
+      console.warn('[WaveEngine] NeuralInference failed to load (model may not be present):', e);
+    });
+  }, []);
+
   // Handle simulation resetting triggered from outside
   useEffect(() => {
     if (resetTrigger > 0) {
@@ -214,6 +233,8 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
         workerRef.current?.postMessage({ type: 'reset' });
       } else if (solverMode === 'remote_spectral') {
         fetch('http://localhost:8000/reset').catch(e => console.error("Failed to call remote reset:", e));
+      } else if (solverMode === 'neural_operator') {
+        neuralRef.current?.reset();
       }
     }
   }, [resetTrigger, solverMode, gl, targets]);
@@ -254,6 +275,46 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
   // Execute Simulation Step on every frame
   useFrame(() => {
     const { prev, curr, next } = rtPointers.current;
+
+    // NEURAL OPERATOR: Autoregressive neural rollout via ONNX Runtime Web
+    if (solverMode === 'neural_operator') {
+        const neural = neuralRef.current;
+        if (neural && neural.isReady()) {
+            // Inject pulse on pointer down (same edge-detect pattern as remote_spectral)
+            if (isPointerDown && !wasPointerDown.current && pointerUV) {
+                neuralSourceRef.current = neural.injectPulse(
+                    pointerUV.y, // theta0 in UV [0,1]
+                    pointerUV.x, // phi0 in UV [0,1]
+                    10000.0
+                );
+            }
+
+            // Run inference if not already busy
+            if (!neuralBusy.current) {
+                neuralBusy.current = true;
+                const source = neuralSourceRef.current;
+                neuralSourceRef.current = null; // consume the source
+
+                neural.predict(source).then((result) => {
+                    const hostData = hostTexture.image.data as unknown as Float32Array;
+                    hostData.set(result);
+                    hostTexture.needsUpdate = true;
+                    neuralBusy.current = false;
+
+                    // Report inference timing to parent
+                    if (onInferenceTime) {
+                        onInferenceTime(neural.getLastInferenceMs());
+                    }
+                }).catch((e) => {
+                    console.error('[WaveEngine] Neural inference error:', e);
+                    neuralBusy.current = false;
+                });
+            }
+        }
+        onOutputTextureReady(hostTexture);
+        wasPointerDown.current = isPointerDown;
+        return;
+    }
 
     // REMOTE SPECTRAL: We continuously poll Python to provide the field state
     if (solverMode === 'remote_spectral') {

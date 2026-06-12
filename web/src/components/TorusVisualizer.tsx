@@ -10,6 +10,7 @@ interface TorusVisualizerProps {
   intensityMultiplier?: number;
   solverMode?: SolverMode;
   resetTrigger?: number;
+  onInferenceTime?: (ms: number) => void;
 }
 
 const vertexShader = `
@@ -82,7 +83,7 @@ const fragmentShader = `
 `;
 
 export const TorusVisualizer: React.FC<TorusVisualizerProps> = ({ 
-  R, r, radialSegments, tubularSegments, intensityMultiplier = 1.5, solverMode = 'webgl', resetTrigger = 0
+  R, r, radialSegments, tubularSegments, intensityMultiplier = 1.5, solverMode = 'webgl', resetTrigger = 0, onInferenceTime
 }) => {
   const materialRef = useRef<THREE.ShaderMaterial>(null);
   
@@ -115,6 +116,7 @@ export const TorusVisualizer: React.FC<TorusVisualizerProps> = ({
         r={r}
         solverMode={solverMode}
         resetTrigger={resetTrigger}
+        onInferenceTime={onInferenceTime}
       />
       
       <mesh 
