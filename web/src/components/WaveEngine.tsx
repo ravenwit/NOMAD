@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useEffect } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { NeuralInference } from '../numerical/NeuralInference';
+import { GeoFNOInference } from '../numerical/GeoFNOInference';
 
 const W = 256; // Grid resolution
 const H = 256;
@@ -85,7 +86,7 @@ void main() {
 }
 `;
 
-export type SolverMode = 'webgl' | 'local_spectral' | 'remote_spectral' | 'neural_operator';
+export type SolverMode = 'webgl' | 'local_spectral' | 'remote_spectral' | 'neural_operator' | 'geofno';
 
 export interface WaveEngineProps {
   onOutputTextureReady: (tex: THREE.Texture) => void;
@@ -179,6 +180,8 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
   const neuralBusy = useRef(false);
   const neuralSourceRef = useRef<Float32Array | null>(null);
 
+  const geoRef = useRef<GeoFNOInference | null>(null);
+
   const workerRef = useRef<Worker | null>(null);
   const workerBusy = useRef(false);
 
@@ -218,6 +221,17 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
     });
   }, []);
 
+  // Initialize GeoFNOInference on mount
+  useEffect(() => {
+    const geo = new GeoFNOInference();
+    geoRef.current = geo;
+    geo.init('/geofno_quantized_fp16.onnx').then(() => {
+      console.log('[WaveEngine] GeoFNOInference ready');
+    }).catch((e) => {
+      console.warn('[WaveEngine] GeoFNOInference failed to load:', e);
+    });
+  }, []);
+
   // Handle simulation resetting triggered from outside
   useEffect(() => {
     if (resetTrigger > 0) {
@@ -235,6 +249,8 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
         fetch('http://localhost:8000/reset').catch(e => console.error("Failed to call remote reset:", e));
       } else if (solverMode === 'neural_operator') {
         neuralRef.current?.reset();
+      } else if (solverMode === 'geofno') {
+        geoRef.current?.reset();
       }
     }
   }, [resetTrigger, solverMode, gl, targets]);
@@ -275,6 +291,30 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
   // Execute Simulation Step on every frame
   useFrame(() => {
     const { prev, curr, next } = rtPointers.current;
+
+    // GEOFNO: Diffeomorphic neural rollout
+    if (solverMode === 'geofno') {
+        const geo = geoRef.current;
+        if (geo && geo.isReady()) {
+            // Inject pulse on pointer down
+            if (isPointerDown && !wasPointerDown.current && pointerUV) {
+                geo.injectPulse(pointerUV.y, pointerUV.x, 10000.0).catch(e => console.error(e));
+            }
+
+            const frameData = geo.tick();
+            if (frameData) {
+                const hostData = hostTexture.image.data as unknown as Float32Array;
+                hostData.set(frameData);
+                hostTexture.needsUpdate = true;
+            }
+            if (onInferenceTime) {
+                onInferenceTime(geo.getLastInferenceMs());
+            }
+        }
+        onOutputTextureReady(hostTexture);
+        wasPointerDown.current = isPointerDown;
+        return;
+    }
 
     // NEURAL OPERATOR: Autoregressive neural rollout via ONNX Runtime Web
     if (solverMode === 'neural_operator') {

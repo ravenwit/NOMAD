@@ -46,6 +46,12 @@ function App() {
             >
               Neural FNO (ONNX)
             </button>
+            <button 
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${solverMode === 'geofno' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/30' : 'text-zinc-400 hover:text-white hover:bg-zinc-800/50'}`}
+              onClick={() => setSolverMode('geofno')}
+            >
+              GeoFNO (256x256 ONNX)
+            </button>
           </div>
           
           <button 
@@ -85,11 +91,11 @@ function App() {
       
       <div className="p-4 bg-zinc-900/80 backdrop-blur border-t border-zinc-800 flex justify-between items-center text-sm text-zinc-400">
         <div>
-          <span className="font-semibold text-zinc-200">Mode:</span> {solverMode === 'webgl' ? 'WebGL-Harmonized FDTD' : solverMode === 'local_spectral' ? 'TypeScript Spectral (FFT)' : solverMode === 'remote_spectral' ? 'Python GPU Spectral (FFT)' : 'Neural Operator PeriodicUNet (ONNX Runtime Web)'}
+          <span className="font-semibold text-zinc-200">Mode:</span> {solverMode === 'webgl' ? 'WebGL-Harmonized FDTD' : solverMode === 'local_spectral' ? 'TypeScript Spectral (FFT)' : solverMode === 'remote_spectral' ? 'Python GPU Spectral (FFT)' : solverMode === 'neural_operator' ? 'Neural Operator PeriodicUNet (ONNX Runtime Web)' : 'GeoFNO Fast Forward Autoregressive (ONNX Runtime Web)'}
         </div>
         <div className="flex gap-4">
           <span>Grid: {solverMode === 'neural_operator' ? '64×64 → 256×256 (upsampled)' : '256x256'}</span>
-          <span>Integrator: {solverMode === 'webgl' ? 'Shader Harmonized Leapfrog' : solverMode === 'local_spectral' ? 'JS Native Spectral Math' : solverMode === 'remote_spectral' ? 'Torch Accelerated Spectral' : 'Autoregressive Neural Rollout'}</span>
+          <span>Integrator: {solverMode === 'webgl' ? 'Shader Harmonized Leapfrog' : solverMode === 'local_spectral' ? 'JS Native Spectral Math' : solverMode === 'remote_spectral' ? 'Torch Accelerated Spectral' : solverMode === 'neural_operator' ? 'Autoregressive Neural Rollout' : 'Diffeomorphic Neural Rollout (30 Frames Ahead)'}</span>
           <span>Metric: g_tt, g_pp</span>
         </div>
       </div>
