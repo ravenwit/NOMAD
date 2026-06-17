@@ -13,7 +13,7 @@ interface TorusVisualizerProps {
   onInferenceTime?: (ms: number) => void;
 }
 
-const vertexShader = `
+export const vertexShader = `
   varying vec2 vUv;
   varying vec3 vNormal;
   varying vec3 vViewPosition;
@@ -29,7 +29,7 @@ const vertexShader = `
   }
 `;
 
-const fragmentShader = `
+export const fragmentShader = `
   uniform float intensity;
   uniform sampler2D dataTexture;
   varying vec2 vUv;

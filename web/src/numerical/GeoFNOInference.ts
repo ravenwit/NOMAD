@@ -132,6 +132,7 @@ export class GeoFNOInference {
   async init(modelUrl: string): Promise<void> {
     try {
       ort.env.wasm.numThreads = 1;
+      ort.env.wasm.proxy = true; // Run WASM in a background worker to prevent UI freezing
 
       this.session = await ort.InferenceSession.create(modelUrl, {
         executionProviders: ['wasm']
@@ -335,5 +336,18 @@ export class GeoFNOInference {
 
   isReady(): boolean {
     return this.ready;
+  }
+
+  async release(): Promise<void> {
+    if (this.session) {
+      try {
+        await this.session.release();
+        this.session = null;
+        this.ready = false;
+        console.log("GeoFNO Inference session released.");
+      } catch (e) {
+        console.error("Error releasing GeoFNO Inference session:", e);
+      }
+    }
   }
 }

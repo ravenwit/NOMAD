@@ -49,10 +49,11 @@ export class NeuralInference {
 
       // Disable multithreading to avoid SharedArrayBuffer requirements
       ort.env.wasm.numThreads = 1;
+      ort.env.wasm.proxy = true; // Run WASM in a background worker to prevent UI freezing
 
       // Load model with WebGPU backend
       this.session = await ort.InferenceSession.create(modelUrl, {
-        executionProviders: ['webgpu', 'wasm'] // Fallback to wasm if webgpu is unavailable
+        executionProviders: ['webgpu', 'webgl', 'wasm'] // Fallback to webgl/wasm if webgpu is unavailable
       });
 
       this.ready = true;
@@ -192,5 +193,18 @@ export class NeuralInference {
 
   isReady(): boolean {
     return this.ready;
+  }
+
+  async release(): Promise<void> {
+    if (this.session) {
+      try {
+        await this.session.release();
+        this.session = null;
+        this.ready = false;
+        console.log("Neural Inference session released.");
+      } catch (e) {
+        console.error("Error releasing Neural Inference session:", e);
+      }
+    }
   }
 }

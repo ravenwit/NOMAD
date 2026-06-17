@@ -3,6 +3,7 @@ import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { NeuralInference } from '../numerical/NeuralInference';
 import { GeoFNOInference } from '../numerical/GeoFNOInference';
+import { HuggingFaceInference } from '../numerical/HuggingFaceInference';
 
 const W = 256; // Grid resolution
 const H = 256;
@@ -86,7 +87,7 @@ void main() {
 }
 `;
 
-export type SolverMode = 'webgl' | 'local_spectral' | 'remote_spectral' | 'neural_operator' | 'geofno';
+export type SolverMode = 'webgl' | 'local_spectral' | 'remote_spectral' | 'neural_operator' | 'geofno' | 'huggingface';
 
 export interface WaveEngineProps {
   onOutputTextureReady: (tex: THREE.Texture) => void;
@@ -136,12 +137,13 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
     next: targets[2],
   });
 
-  // Source Texture corresponding to physical "taps"
-  const sourceTexture = useMemo(() => {
+  const sourceTextureRef = useRef<THREE.DataTexture | null>(null);
+  if (!sourceTextureRef.current) {
     const tex = new THREE.DataTexture(new Float32Array(W * H), W, H, THREE.RedFormat, THREE.FloatType);
     tex.needsUpdate = true;
-    return tex;
-  }, []);
+    sourceTextureRef.current = tex;
+  }
+  const sourceTexture = sourceTextureRef.current;
 
   // Compute Scene elements
   const scene = useMemo(() => new THREE.Scene(), []);
@@ -164,10 +166,12 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
   }, [R, r, sourceTexture]);
 
   useEffect(() => {
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+    const geometry = new THREE.PlaneGeometry(2, 2);
+    const mesh = new THREE.Mesh(geometry, material);
     scene.add(mesh);
     return () => {
       scene.remove(mesh);
+      geometry.dispose();
     };
   }, [material, scene]);
 
@@ -181,6 +185,7 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
   const neuralSourceRef = useRef<Float32Array | null>(null);
 
   const geoRef = useRef<GeoFNOInference | null>(null);
+  const hfRef = useRef<HuggingFaceInference | null>(null);
 
   const workerRef = useRef<Worker | null>(null);
   const workerBusy = useRef(false);
@@ -219,6 +224,10 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
     }).catch((e) => {
       console.warn('[WaveEngine] NeuralInference failed to load (model may not be present):', e);
     });
+
+    return () => {
+      neural.release();
+    };
   }, []);
 
   // Initialize GeoFNOInference on mount
@@ -229,6 +238,21 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
       console.log('[WaveEngine] GeoFNOInference ready');
     }).catch((e) => {
       console.warn('[WaveEngine] GeoFNOInference failed to load:', e);
+    });
+
+    return () => {
+      geo.release();
+    };
+  }, []);
+
+  // Initialize HuggingFaceInference on mount
+  useEffect(() => {
+    const hf = new HuggingFaceInference();
+    hfRef.current = hf;
+    hf.init().then(() => {
+      console.log('[WaveEngine] HuggingFaceInference ready');
+    }).catch((e) => {
+      console.warn('[WaveEngine] HuggingFaceInference failed to load:', e);
     });
   }, []);
 
@@ -251,19 +275,22 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
         neuralRef.current?.reset();
       } else if (solverMode === 'geofno') {
         geoRef.current?.reset();
+      } else if (solverMode === 'huggingface') {
+        hfRef.current?.reset();
       }
     }
   }, [resetTrigger, solverMode, gl, targets]);
 
   
   // Dedicated data texture to hold the frames from Python / Local TS
-  const hostTexture = useMemo(() => {
+  const hostTextureRef = useRef<THREE.DataTexture | null>(null);
+  if (!hostTextureRef.current) {
     const tex = new THREE.DataTexture(new Float32Array(W * H), W, H, THREE.RedFormat, THREE.FloatType);
     tex.needsUpdate = true;
-    return tex;
-  }, []);
+    hostTextureRef.current = tex;
+  }
+  const hostTexture = hostTextureRef.current;
 
-  // Function to sync state from Python Spectral Solver
   const syncWithPython = async () => {
     if (fetching.current) return;
     fetching.current = true;
@@ -288,6 +315,17 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
     }
   };
 
+  // Cleanup WebGL resources on unmount
+  useEffect(() => {
+    return () => {
+      targets.forEach(t => t.dispose());
+      sourceTexture.dispose();
+      hostTexture.dispose();
+      material.dispose();
+      // Scene and camera don't explicitly hold heavy GPU buffers unless populated
+    };
+  }, [targets, sourceTexture, hostTexture, material]);
+
   // Execute Simulation Step on every frame
   useFrame(() => {
     const { prev, curr, next } = rtPointers.current;
@@ -309,6 +347,29 @@ export const WaveEngine: React.FC<WaveEngineProps> = ({
             }
             if (onInferenceTime) {
                 onInferenceTime(geo.getLastInferenceMs());
+            }
+        }
+        onOutputTextureReady(hostTexture);
+        wasPointerDown.current = isPointerDown;
+        return;
+    }
+
+    // HUGGINGFACE API: Remote GeoFNO model execution
+    if (solverMode === 'huggingface') {
+        const hf = hfRef.current;
+        if (hf && hf.isReady()) {
+            if (isPointerDown && !wasPointerDown.current && pointerUV) {
+                hf.injectPulse(pointerUV.y, pointerUV.x).catch(e => console.error(e));
+            }
+
+            const frameData = hf.tick();
+            if (frameData) {
+                const hostData = hostTexture.image.data as unknown as Float32Array;
+                hostData.set(frameData);
+                hostTexture.needsUpdate = true;
+            }
+            if (onInferenceTime) {
+                onInferenceTime(hf.getLastInferenceMs());
             }
         }
         onOutputTextureReady(hostTexture);
