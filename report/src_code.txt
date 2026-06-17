@@ -1,0 +1,1177 @@
+i have to a detailed report on the project that im doing. it starts with simulating acoustic wave on torus surface with spectral method. 
+import torch
+import numpy as np
+
+class TorusGeometry:
+    def __init__(self, R: float = 1.0, r: float = 0.3):
+        r"""
+        Differential geometry of a 2D Torus.
+        Coordinates: (theta, phi)
+        theta \in [0, 2pi) - Poloidal angle (around the tube)
+        phi \in [0, 2pi)   - Toroidal angle (around the main axis)
+
+        Metric g:
+        ds^2 = r^2 d\theta^2 + (R + r \cos\theta)^2 d\phi^2
+        """
+        self.R = R
+        self.r = r
+
+    def get_metric_elements(self, theta: torch.Tensor):
+        r"""
+        Returns the non-zero components of the metric tensor: g_{\theta\theta} and g_{\phi\phi}
+        """
+        g_tt = torch.full_like(theta, self.r**2)
+        g_pp = (self.R + self.r * torch.cos(theta))**2
+        return g_tt, g_pp
+
+    def get_inverse_metric_elements(self, theta: torch.Tensor):
+        r"""
+        Returns g^{\theta\theta} and g^{\phi\phi}
+        """
+        g_tt, g_pp = self.get_metric_elements(theta)
+        return 1.0 / g_tt, 1.0 / g_pp
+
+    def get_sqrt_det_g(self, theta: torch.Tensor):
+        r"""
+        Returns \sqrt{|g|} = r(R + r \cos\theta)
+        """
+        return self.r * (self.R + self.r * torch.cos(theta))
+
+
+def compute_gradient(f, dtheta: float, dphi: float):
+    r"""
+    Computes \nabla f = [ \partial_\theta f, \partial_\phi f ]
+    using 4th-order central differences with periodic boundaries.
+    f shape: (Batch, Channels, N_theta, N_phi)
+    """
+    # 4th order: (-f_{i+2} + 8f_{i+1} - 8f_{i-1} + f_{i-2}) / 12h
+    # Pad circularly
+    f_pad_theta = torch.nn.functional.pad(f, (0, 0, 2, 2), mode='circular')
+    df_dtheta = (-f_pad_theta[:, :, 4:, :] + 8*f_pad_theta[:, :, 3:-1, :] -
+                 8*f_pad_theta[:, :, 1:-3, :] + f_pad_theta[:, :, :-4, :]) / (12 * dtheta)
+
+    f_pad_phi = torch.nn.functional.pad(f, (2, 2, 0, 0), mode='circular')
+    df_dphi = (-f_pad_phi[:, :, :, 4:] + 8*f_pad_phi[:, :, :, 3:-1] -
+               8*f_pad_phi[:, :, :, 1:-3] + f_pad_phi[:, :, :, :-4]) / (12 * dphi)
+
+    return df_dtheta, df_dphi
+
+
+def compute_laplace_beltrami(f: torch.Tensor, geometry: TorusGeometry, dtheta: float, dphi: float):
+    r"""
+    Computes \Delta_M f = \frac{1}{\sqrt{|g|}} \partial_i (\sqrt{|g|} g^{ij} \partial_j f)
+    f shape: (Batch, Channels, N_theta, N_phi)
+    """
+    device = f.device
+    N_theta = f.shape[2]
+
+    # 1D theta grid matching spatial resolution
+    theta_1d = torch.linspace(0, 2*np.pi, N_theta + 1, device=device)[:-1]
+    theta_grid = theta_1d.view(1, 1, N_theta, 1) # Expand shapes for broadcasting
+
+    # Differential geometry terms
+    sqrt_g = geometry.get_sqrt_det_g(theta_grid)
+    g_inv_tt, g_inv_pp = geometry.get_inverse_metric_elements(theta_grid)
+
+    # 1. Gradient: \partial_j f
+    df_dtheta, df_dphi = compute_gradient(f, dtheta, dphi)
+
+    # 2. Multiply by \sqrt{|g|} g^{ij}
+    V_theta = sqrt_g * g_inv_tt * df_dtheta
+    V_phi   = sqrt_g * g_inv_pp * df_dphi
+
+    # 3. Divergence: \partial_i V^i
+    dV_theta_dtheta, _ = compute_gradient(V_theta, dtheta, dphi)
+    _, dV_phi_dphi = compute_gradient(V_phi, dtheta, dphi)
+
+    # 4. Multiply by 1/\sqrt{|g|}
+    laplacian = (1.0 / sqrt_g) * (dV_theta_dtheta + dV_phi_dphi)
+
+    return laplacian
+
+import torch
+import numpy as np
+import h5py
+from typing import Callable, Optional, Tuple
+# from .geometry import TorusGeometry, compute_laplace_beltrami
+
+class TorusWaveSolverRK4:
+    def __init__(self, R: float = 1.0, r: float = 0.3, c: float = 1.0,
+                 N_theta: int = 256, N_phi: int = 256, CFL: float = 0.5):
+        """
+        High-fidelity 4th-Order Runge-Kutta acoustic wave solver on the Torus.
+        """
+        self.geom = TorusGeometry(R, r)
+        self.c = c
+        self.N_theta = N_theta
+        self.N_phi = N_phi
+
+        self.dtheta = 2 * np.pi / N_theta
+        self.dphi = 2 * np.pi / N_phi
+
+        # Strictest grid size occurs at the inner equator (theta = pi)
+        # where g_{\phi\phi} = (R - r)^2, so physical distance dphi_phys = (R-r)*dphi
+        min_dx = min(r * self.dtheta, (R - r) * self.dphi)
+
+        # Time step governed by Courant-Friedrichs-Lewy condition
+        self.dt = CFL * min_dx / c
+        print(f"Initialized TorusSolver: Grid {N_theta}x{N_phi}. Required dt: {self.dt:.6f}")
+
+    def generate_ricker_pulse(self, t: float, t0: float, sigma_t: float,
+                             theta0: float, phi0: float, sigma_s: float,
+                             amplitude: torch.Tensor, device: torch.device):
+        """
+        A zero-mean Ricker Wavelet (Mexican Hat) source pulse.
+        """
+        theta_1d = torch.linspace(0, 2*np.pi, self.N_theta + 1, device=device)[:-1]
+        phi_1d = torch.linspace(0, 2*np.pi, self.N_phi + 1, device=device)[:-1]
+
+        theta_grid, phi_grid = torch.meshgrid(theta_1d, phi_1d, indexing='ij')
+
+        dtheta_dist = (theta_grid - theta0 + np.pi) % (2*np.pi) - np.pi
+        dphi_dist = (phi_grid - phi0 + np.pi) % (2*np.pi) - np.pi
+
+        # Physical squared distance
+        r_sq = (self.geom.r * dtheta_dist)**2 + ((self.geom.R + self.geom.r * np.cos(theta0)) * dphi_dist)**2
+
+        # Ricker Wavelet: (1 - r^2/sigma^2) * exp(-r^2/(2*sigma^2))
+        r_sq_over_sigma_sq = r_sq / (sigma_s ** 2)
+        spatial = (2.0 - r_sq_over_sigma_sq) * torch.exp(-r_sq / (2 * sigma_s ** 2))
+
+        # Subtract mean to ensure zero-mean (Mexican Hat filter)
+        spatial = spatial - spatial.mean()
+
+        temporal = np.exp(-(t - t0)**2 / (2 * sigma_t**2))
+
+        S = spatial * temporal
+        S = S.unsqueeze(-1) * amplitude
+        S = S.unsqueeze(0).permute(0, 3, 1, 2)
+        return S
+
+    def _rk4_step(self, P: torch.Tensor, Q: torch.Tensor, S: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Wave equation as first order system:
+        dP/dt = Q
+        dQ/dt = c^2 \Delta_M P + S
+        """
+        def dP_dt(q):
+            return q
+
+        def dQ_dt(p, s):
+            LB = compute_laplace_beltrami(p, self.geom, self.dtheta, self.dphi)
+            return self.c**2 * LB + s
+
+        k1_P = dP_dt(Q)
+        k1_Q = dQ_dt(P, S)
+
+        P2 = P + 0.5 * self.dt * k1_P
+        Q2 = Q + 0.5 * self.dt * k1_Q
+        k2_P = dP_dt(Q2)
+        k2_Q = dQ_dt(P2, S)
+
+        P3 = P + 0.5 * self.dt * k2_P
+        Q3 = Q + 0.5 * self.dt * k2_Q
+        k3_P = dP_dt(Q3)
+        k3_Q = dQ_dt(P3, S)
+
+        P4 = P + self.dt * k3_P
+        Q4 = Q + self.dt * k3_Q
+        k4_P = dP_dt(Q4)
+        k4_Q = dQ_dt(P4, S)
+
+        P_new = P + (self.dt / 6.0) * (k1_P + 2*k2_P + 2*k3_P + k4_P)
+        Q_new = Q + (self.dt / 6.0) * (k1_Q + 2*k2_Q + 2*k3_Q + k4_Q)
+
+        return P_new, Q_new
+
+    def simulate(self, num_steps: int, source_fn: Optional[Callable],
+                 device: torch.device, record_every: int = 10, channels: int = 1):
+
+        P = torch.zeros((1, channels, self.N_theta, self.N_phi), device=device)
+        Q = torch.zeros_like(P)
+
+        history_P = []
+        history_S = []
+
+        t = 0.0
+        for step in range(num_steps):
+            if source_fn:
+                S = source_fn(t, device)
+            else:
+                S = torch.zeros_like(P)
+
+            P, Q = self._rk4_step(P, Q, S)
+            t += self.dt
+
+            if step % record_every == 0:
+                history_P.append(P.clone().cpu())
+                history_S.append(S.clone().cpu())
+
+                if step % (num_steps//10) == 0:
+                    print(f"Simulating progress: {100*step/num_steps:.1f}% (t={t:.4f}s)")
+
+                    # Watch for divergence blow-up
+                    if not torch.isfinite(P).all() or P.abs().max() > 1e6:
+                        print("WARNING: Numerical instability detected!")
+                        break
+
+        # Stack to (Batch, Time, Channels, H, W)
+        return torch.stack(history_P, dim=1), torch.stack(history_S, dim=1)
+
+class TorusSpectralSolver:
+    def __init__(self, R: float = 3.0, r: float = 1.0, c: float = 343.0,
+                 N_theta: int = 256, N_phi: int = 256, CFL: float = 0.1):
+        """
+        Implementation of the Fourier Pseudospectral method for acoustic waves on a torus.
+        As described in acoustic-spectral.md
+        """
+        self.R = R
+        self.r = r
+        self.c = c
+        self.N_theta = N_theta
+        self.N_phi = N_phi
+
+        self.d_theta = 2 * np.pi / N_theta
+        self.d_phi = 2 * np.pi / N_phi
+
+        # CFL Condition: dt = CFL * min_dx / c
+        min_dx = min(r * self.d_theta, (R - r) * self.d_phi)
+        self.dt = CFL * min_dx / c
+
+        # Wavenumbers for spectral differentiation
+        # k = [0, 1, ..., N/2-1, -N/2, ..., -1]
+        self.k_theta = torch.fft.fftfreq(N_theta).to(torch.float32) * N_theta
+        self.k_phi = torch.fft.fftfreq(N_phi).to(torch.float32) * N_phi
+
+        self.K_THETA, self.K_PHI = torch.meshgrid(self.k_theta, self.k_phi, indexing='ij')
+
+        # Static Geometric Terms (Physical Space)
+        theta_grid = torch.linspace(0, 2*np.pi, N_theta + 1)[:-1]
+        phi_grid = torch.linspace(0, 2*np.pi, N_phi + 1)[:-1]
+        THETA, _ = torch.meshgrid(theta_grid, phi_grid, indexing='ij')
+
+        self.THETA = THETA
+        self.g_inv_tt = 1.0 / (r**2)
+        self.g_inv_pp = 1.0 / (R + r * torch.cos(THETA))**2
+        self.gamma_term = -torch.sin(THETA) / (r * (R + r * torch.cos(THETA)))
+        self.sqrt_g = r * (R + r * torch.cos(THETA))
+
+    def generate_ricker_pulse(self, t: float, t0: float, sigma_t: float,
+                             theta0: float, phi0: float, sigma_s: float,
+                             amplitude: torch.Tensor, device: torch.device):
+        """
+        Generate a zero-mean Ricker Wavelet (Mexican Hat) source pulse in 2D.
+        """
+        theta_1d = torch.linspace(0, 2*np.pi, self.N_theta + 1, device=device)[:-1]
+        phi_1d = torch.linspace(0, 2*np.pi, self.N_phi + 1, device=device)[:-1]
+
+        theta_grid, phi_grid = torch.meshgrid(theta_1d, phi_1d, indexing='ij')
+
+        dtheta_dist = (theta_grid - theta0 + np.pi) % (2*np.pi) - np.pi
+        dphi_dist = (phi_grid - phi0 + np.pi) % (2*np.pi) - np.pi
+
+        # Physical squared distance
+        r_sq = (self.r * dtheta_dist)**2 + ((self.R + self.r * np.cos(theta0)) * dphi_dist)**2
+
+        r_sq_over_sigma_sq = r_sq / (sigma_s ** 2)
+        spatial = (2.0 - r_sq_over_sigma_sq) * torch.exp(-r_sq / (2 * sigma_s ** 2))
+        spatial = spatial - spatial.mean()
+
+        temporal = np.exp(-(t - t0)**2 / (2 * sigma_t**2))
+
+        # S base shape: (N_theta, N_phi)
+        S_base = spatial * temporal
+
+        # Expand based on amplitude (C, H, W)
+        # amplitude shape: (C,)
+        S = S_base.unsqueeze(0) * amplitude.view(-1, 1, 1)
+        return S # (C, H, W)
+
+    def compute_laplace_beltrami(self, P: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the Laplacian in spectral space.
+        """
+        device = P.device
+        # Move precomputed tensors to the correct device if needed
+        self.K_THETA = self.K_THETA.to(device)
+        self.K_PHI = self.K_PHI.to(device)
+        self.g_inv_pp = self.g_inv_pp.to(device)
+        self.gamma_term = self.gamma_term.to(device)
+        self.sqrt_g = self.sqrt_g.to(device)
+
+        # Forward FFT
+        P_hat = torch.fft.fft2(P)
+
+        # First derivative w.r.t theta: F^-1 [ i * k_theta * P_hat ]
+        dP_dtheta_hat = 1j * self.K_THETA * P_hat
+        dP_dtheta = torch.real(torch.fft.ifft2(dP_dtheta_hat))
+
+        # Second derivative w.r.t theta: F^-1 [ -k_theta^2 * P_hat ]
+        d2P_dtheta2_hat = -(self.K_THETA**2) * P_hat
+        d2P_dtheta2 = torch.real(torch.fft.ifft2(d2P_dtheta2_hat))
+
+        # Second derivative w.r.t phi: F^-1 [ -k_phi^2 * P_hat ]
+        d2P_dphi2_hat = -(self.K_PHI**2) * P_hat
+        d2P_dphi2 = torch.real(torch.fft.ifft2(d2P_dphi2_hat))
+
+        # Assemble Laplacian in physical space
+        # LB = (1/r^2) * d2P/dtheta^2 + gamma * dP/dtheta + g^pp * d2P/dphi^2
+        # Note: self.g_inv_tt is 1/r^2
+        laplace = (self.g_inv_tt * d2P_dtheta2) + \
+                  (self.gamma_term * dP_dtheta) + \
+                  (self.g_inv_pp * d2P_dphi2)
+
+        return laplace
+
+    def simulate(self, num_steps: int, source_fn: Optional[Callable],
+                 device: torch.device, record_every: int = 10, channels: int = 3):
+        """
+        Explicit Leapfrog Time-Stepping as per acoustic-spectral.md
+        """
+        P_curr = torch.zeros((channels, self.N_theta, self.N_phi), device=device)
+        P_prev = torch.zeros_like(P_curr)
+
+        history_P = []
+        history_S = []
+        t = 0.0
+
+        for step in range(num_steps):
+            S_curr = source_fn(t, device) if source_fn else torch.zeros_like(P_curr)
+
+            # Evaluate Laplacian
+            laplacian = self.compute_laplace_beltrami(P_curr)
+
+            # Acceleration: c^2 * (Laplacian + S)
+            accel = (self.c**2) * (laplacian + S_curr)
+
+            # Leapfrog: P_next = 2*P_curr - P_prev + dt^2 * acceleration
+            P_next = 2 * P_curr - P_prev + (self.dt**2) * accel
+
+            # Update state
+            P_prev = P_curr
+            P_curr = P_next
+            t += self.dt
+
+            if step % record_every == 0:
+                history_P.append(P_curr.clone().cpu())
+                history_S.append(S_curr.clone().cpu())
+
+                if step % (max(1, num_steps//10)) == 0:
+                    print(f"Spectral Sim: {100*step/num_steps:.1f}% (t={t:.4f}s)")
+                    if not torch.isfinite(P_curr).all():
+                        print("ERROR: Divergence in spectral solver!")
+                        break
+
+        # Return (Batch=1, Time, Channels, H, W) to match the expected deep learning dataset shape
+        P_stack = torch.stack(history_P, dim=0).unsqueeze(0)
+        S_stack = torch.stack(history_S, dim=0).unsqueeze(0)
+        return P_stack, S_stack
+
+
+
+class TorusAcousticSimulator:
+    def __init__(self, R=3.0, r=1.0, c=343.0, N_theta=128, N_phi=128, dt=None):
+        self.solver = TorusSpectralSolver(R, r, c, N_theta, N_phi, CFL=0.1)
+        self.dt = dt if dt else self.solver.dt
+        self.solver.dt = self.dt
+
+        # Initialize macroscopic clock tracking variables
+        self.record_every = None
+        self.dt_macro = None
+
+    def generate_gaussian_source(self, t, t0=0.05, sigma_t=0.01, theta0=np.pi, phi0=np.pi, sigma_s=0.5, amplitude=None, device='cpu'):
+        """Deprecated: use generate_ricker_pulse instead."""
+        return self.generate_ricker_pulse(t, t0, sigma_t, theta0, phi0, sigma_s, amplitude, device)
+
+    def generate_ricker_pulse(self, t, t0=0.05, sigma_t=0.01, theta0=np.pi, phi0=np.pi, sigma_s=0.5, amplitude=None, device='cpu'):
+        if amplitude is None:
+            amplitude = torch.tensor([1.0], device=device)
+        return self.solver.generate_ricker_pulse(t, t0, sigma_t, theta0, phi0, sigma_s, amplitude, device)
+
+    def generate_kicker_pulse(self, t, t0=0.05, sigma_t=0.01, theta0=np.pi, phi0=np.pi, sigma_s=0.5, amplitude=None, device='cpu'):
+        """Alias for generate_ricker_pulse."""
+        return self.generate_ricker_pulse(t, t0, sigma_t, theta0, phi0, sigma_s, amplitude, device)
+
+    def simulate(self, num_steps=500, source_generator_fn=None, device='cpu', record_every=10):
+        # Bind the frame rate and physical clock directly to the object state
+        self.record_every = record_every
+        self.dt_macro = self.dt * record_every
+
+        print("dt: ", self.dt_macro)
+
+        return self.solver.simulate(num_steps, source_generator_fn, device, record_every)
+
+    def save_to_h5(self, P, S, filename):
+        """
+        Saves NOMAD simulation data to HDF5 using internal state variables.
+        Shapes expected: P, S: (Batch, Time, Channels, H, W)
+        """
+        # Failsafe: Prevent saving if the simulation hasn't been run yet
+        if self.dt_macro is None:
+            raise ValueError("Cannot save to HDF5: No simulation has been run to establish dt_macro.")
+
+        with h5py.File(filename, 'w') as f:
+            # Move Channels to end for storage: (B, T, C, H, W) -> (B, T, H, W, C)
+            P_save = P.permute(0, 1, 3, 4, 2).cpu().numpy()
+            S_save = S.permute(0, 1, 3, 4, 2).cpu().numpy()
+
+            f.create_dataset('pressure', data=P_save, compression="gzip")
+            f.create_dataset('source', data=S_save, compression="gzip")
+
+            # Store Spatial & Geometric Configuration
+            f.attrs['R'] = self.solver.R
+            f.attrs['r'] = self.solver.r
+            f.attrs['N_theta'] = self.solver.N_theta
+            f.attrs['N_phi'] = self.solver.N_phi
+            f.attrs['c'] = self.solver.c
+
+            # Fetch the Temporal Configuration directly from self
+            f.attrs['dt_solver'] = self.dt
+            f.attrs['record_every'] = self.record_every
+            f.attrs['dt_macro'] = self.dt_macro
+
+        print(f"Dataset successfully saved to {filename}")
+        print(f" -> Mathematical Clock: dt_solver = {self.dt:.6f}s")
+        print(f" -> Physical Clock for FNO: dt_macro = {self.dt_macro:.6f}s")
+
+
+
+
+then, i trained with it periodicunet which didnt give good results.
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DoubleConv(nn.Module):
+    """(convolution => [BN] => ReLU) * 2"""
+    def __init__(self, in_channels, out_channels, mid_channels=None):
+        super().__init__()
+        if not mid_channels:
+            mid_channels = out_channels
+
+        # We MUST use circular padding for periodic boundaries
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, padding_mode='circular', bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, padding_mode='circular', bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
+class Down(nn.Module):
+    """Downscaling with maxpool then double conv"""
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(2),
+            DoubleConv(in_channels, out_channels)
+        )
+
+    def forward(self, x):
+        return self.maxpool_conv(x)
+
+class Up(nn.Module):
+    """Upscaling then double conv"""
+    def __init__(self, in_channels, out_channels, bilinear=True):
+        super().__init__()
+        if bilinear:
+            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
+        else:
+            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+            self.conv = DoubleConv(in_channels, out_channels)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+
+        # Use circular padding even for size mismatch padding conceptually
+        # Although interpolation should prevent strong mismatches.
+        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
+                        diffY // 2, diffY - diffY // 2], mode='circular')
+
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+
+class OutConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(OutConv, self).__init__()
+        # Circular padding for output conv
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+class PeriodicUNet(nn.Module):
+    """
+    Conventional UNet architecture strongly conditioned to Periodic Manifolds.
+    By setting padding_mode='circular', the convolution kernels inherently warp
+    across the left/right and top/bottom edges of the state tensor, natively simulating
+    the Torus topology.
+    """
+    def __init__(self, n_channels, n_classes, bilinear=False):
+        super(PeriodicUNet, self).__init__()
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+        self.bilinear = bilinear
+
+        self.inc = DoubleConv(n_channels, 64)
+        self.down1 = Down(64, 128)
+        self.down2 = Down(128, 256)
+        self.down3 = Down(256, 512)
+        factor = 2 if bilinear else 1
+        self.down4 = Down(512, 1024 // factor)
+
+        self.up1 = Up(1024, 512 // factor, bilinear)
+        self.up2 = Up(512, 256 // factor, bilinear)
+        self.up3 = Up(256, 128 // factor, bilinear)
+        self.up4 = Up(128, 64, bilinear)
+
+        self.outc = OutConv(64, n_classes)
+
+    def forward(self, x):
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+
+        logits = self.outc(x)
+        return logits
+
+import torch
+import numpy as np
+import h5py
+from torch.utils.data import Dataset, DataLoader
+import os
+
+class TorusWaveDataset(Dataset):
+    """
+    Manifold-Aware Dataset Engine for Acoustic Wave Operators.
+    Extracts scalar target dimensions and injects spatial metric configurations.
+    """
+    def __init__(self, h5_path, seq_len=4, transform=True):
+        if not os.path.exists(h5_path):
+            raise FileNotFoundError(f"Simulation matrix missing at: {h5_path}")
+
+        with h5py.File(h5_path, 'r') as f:
+            # Slicing [..., 0:1] reduces multi-channel vectors to rank-0 scalars (C=1)
+            raw_P = torch.from_numpy(f['pressure'][:])[..., 0:1]
+            raw_S = torch.from_numpy(f['source'][:])[..., 0:1]
+
+            # Permute to PyTorch standard coordinate alignment: (B, T, C, H, W)
+            self.P = raw_P.permute(0, 1, 4, 2, 3)
+            self.S = raw_S.permute(0, 1, 4, 2, 3)
+
+            self.R = f.attrs['R']
+            self.r = f.attrs['r']
+            self.N_theta = f.attrs['N_theta']
+            self.N_phi = f.attrs['N_phi']
+
+        self.seq_len = seq_len
+        self.num_rollouts = self.P.shape[0]
+        self.time_steps = self.P.shape[1]
+
+        self.valid_starts_per_rollout = max(0, self.time_steps - self.seq_len)
+        if self.valid_starts_per_rollout == 0:
+            raise ValueError(f"Simulation steps ({self.time_steps}) insufficient for window ({self.seq_len})")
+
+        self.transform = transform
+        if self.transform:
+            self._compute_stats()
+            self._normalize()
+
+        # Compute metric scaling transformations map
+        theta_grid = torch.linspace(0, 2*np.pi, self.N_theta + 1)[:-1]
+        phi_grid = torch.linspace(0, 2*np.pi, self.N_phi + 1)[:-1]
+        THETA, _ = torch.meshgrid(theta_grid, phi_grid, indexing='ij')
+
+        metric = self.r * (self.R + self.r * torch.cos(THETA))
+        m_min = self.r * (self.R - self.r)
+        m_max = self.r * (self.R + self.r)
+        metric_norm = (metric - m_min) / (m_max - m_min)
+
+        self.metric_embed = metric_norm.unsqueeze(0).unsqueeze(0).to(torch.float32)
+
+    def _compute_stats(self):
+        self.p_mean, self.p_std = self.P.mean(), torch.clamp(self.P.std(), min=1e-8)
+        self.s_mean, self.s_std = self.S.mean(), torch.clamp(self.S.std(), min=1e-8)
+
+    def _normalize(self):
+        self.P = (self.P - self.p_mean) / self.p_std
+        self.S = (self.S - self.s_mean) / self.s_std
+
+    def denormalize_p(self, p_tensor):
+        return p_tensor * self.p_std + self.p_mean
+
+    def denormalize_s(self, s_tensor):
+        return s_tensor * self.s_std + self.s_mean
+
+    def __len__(self):
+        return self.num_rollouts * self.valid_starts_per_rollout
+
+    def __getitem__(self, idx):
+        rollout_idx = idx // self.valid_starts_per_rollout
+        t_start = idx % self.valid_starts_per_rollout
+        t_end = t_start + self.seq_len
+
+        s_seq = self.S[rollout_idx, t_start:t_end]
+        p_seq = self.P[rollout_idx, t_start:t_end]
+        m_seq = self.metric_embed.expand(self.seq_len, -1, -1, -1)
+
+        return s_seq.float(), p_seq.float(), m_seq.float()
+
+then, with fno2d with exxcellent memorization, but little learning. 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SpectralConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, modes1, modes2):
+        super(SpectralConv2d, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.modes1 = modes1
+
+        self.modes2 = modes2
+
+        self.scale = (1 / (in_channels * out_channels))
+        self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, dtype=torch.cfloat))
+        self.weights2 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, dtype=torch.cfloat))
+
+    def forward(self, x):
+        batchsize = x.shape[0]
+        # Compute Fourier coeffcients up to factor of e^(- something constant)
+        x_ft = torch.fft.rfft2(x)
+
+        # Multiply relevant Fourier modes
+        out_ft = torch.zeros(batchsize, self.out_channels, x.size(-2), x.size(-1)//2 + 1, dtype=torch.cfloat, device=x.device)
+
+        # Upper modes
+        out_ft[:, :, :self.modes1, :self.modes2] = \
+            torch.einsum("bixy,ioxy->boxy", x_ft[:, :, :self.modes1, :self.modes2], self.weights1)
+
+        # Lower modes
+        out_ft[:, :, -self.modes1:, :self.modes2] = \
+            torch.einsum("bixy,ioxy->boxy", x_ft[:, :, -self.modes1:, :self.modes2], self.weights2)
+
+        # Return to physical space
+        x = torch.fft.irfft2(out_ft, s=(x.size(-2), x.size(-1)))
+        return x
+
+class FNO2d(nn.Module):
+    def __init__(self, modes=12, width=32, in_channels=4, out_channels=1):
+        super(FNO2d, self).__init__()
+        self.modes1 = modes
+        self.modes2 = modes
+        self.width = width
+        self.fc0 = nn.Linear(in_channels, self.width)
+
+        self.conv0 = SpectralConv2d(self.width, self.width, self.modes1, self.modes2)
+        self.conv1 = SpectralConv2d(self.width, self.width, self.modes1, self.modes2)
+        self.conv2 = SpectralConv2d(self.width, self.width, self.modes1, self.modes2)
+        self.conv3 = SpectralConv2d(self.width, self.width, self.modes1, self.modes2)
+
+        self.w0 = nn.Conv2d(self.width, self.width, 1)
+        self.w1 = nn.Conv2d(self.width, self.width, 1)
+        self.w2 = nn.Conv2d(self.width, self.width, 1)
+        self.w3 = nn.Conv2d(self.width, self.width, 1)
+
+        self.fc1 = nn.Linear(self.width, 128)
+        self.fc2 = nn.Linear(128, out_channels)
+
+    def forward(self, x):
+        # x is (B, C, H, W)
+        x = x.permute(0, 2, 3, 1) # to (B, H, W, C)
+        x = self.fc0(x)
+        x = x.permute(0, 3, 1, 2) # to (B, W, H, W) for convolutions
+
+        x1 = self.conv0(x)
+        x2 = self.w0(x)
+        x = F.gelu(x1 + x2)
+
+        x1 = self.conv1(x)
+        x2 = self.w1(x)
+        x = F.gelu(x1 + x2)
+
+        x1 = self.conv2(x)
+        x2 = self.w2(x)
+        x = F.gelu(x1 + x2)
+
+        x1 = self.conv3(x)
+        x2 = self.w3(x)
+        x = F.gelu(x1 + x2)
+
+        x = x.permute(0, 2, 3, 1)
+        x = self.fc1(x)
+        x = F.gelu(x)
+        x = self.fc2(x)
+        x = x.permute(0, 3, 1, 2)
+        return x
+
+then, with geo fno2d with excellent results...
+i wantt a detailed md report explaining the theory from mathemathical perspective and explaining the implementation both from technical point of view also with mathematical detailed notion. 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader, Subset
+from torch.amp import autocast, GradScaler
+import numpy as np
+import h5py
+import os
+import sys
+from sklearn.model_selection import train_test_split
+
+# =====================================================================
+# 1. BASE FNO (TIME AS CHANNELS – VECTORIZED)
+# =====================================================================
+class SpectralConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, modes1, modes2):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.modes1 = modes1
+        self.modes2 = modes2
+        scale = 1.0 / (in_channels * out_channels)
+        self.weights1 = nn.Parameter(
+            scale * torch.rand(in_channels, out_channels, modes1, modes2, 2, dtype=torch.float32)
+        )
+        self.weights2 = nn.Parameter(
+            scale * torch.rand(in_channels, out_channels, modes1, modes2, 2, dtype=torch.float32)
+        )
+
+    # def forward(self, x):
+    #     orig_dtype = x.dtype
+    #     with autocast(x.device.type, enabled=False):
+    #         x = x.float()  # FFT requires float32
+    #         B = x.shape[0]
+    #         x_ft = torch.fft.rfft2(x)
+    #         out_ft = torch.zeros(B, self.out_channels,
+    #                              x.size(-2), x.size(-1)//2 + 1,
+    #                              dtype=torch.cfloat, device=x.device)
+    #         w1 = torch.view_as_complex(self.weights1)
+    #         w2 = torch.view_as_complex(self.weights2)
+
+    #         out_ft[:, :, :self.modes1, :self.modes2] = \
+    #             torch.einsum("bixy,ioxy->boxy", x_ft[:, :, :self.modes1, :self.modes2], w1)
+    #         out_ft[:, :, -self.modes1:, :self.modes2] = \
+    #             torch.einsum("bixy,ioxy->boxy", x_ft[:, :, -self.modes1:, :self.modes2], w2)
+
+    #         x = torch.fft.irfft2(out_ft, s=(x.size(-2), x.size(-1)))
+    #     return x.to(orig_dtype)
+
+    def forward(self, x):
+        orig_dtype = x.dtype
+        with autocast(x.device.type, enabled=False):
+            x = x.to(torch.float32)
+            batchsize = x.shape[0]
+
+            # 1. Forward FFT (Supported by ONNX Opset 17)
+            x_ft = torch.fft.rfft2(x)
+
+            # 2. Extract specific mode slices
+            x_ft_1 = x_ft[:, :, :self.modes1, :self.modes2]
+            x_ft_2 = x_ft[:, :, -self.modes1:, :self.modes2]
+
+            # 3. Separate Input into Real and Imaginary (a and b)
+            xr1, xi1 = x_ft_1.real, x_ft_1.imag
+            xr2, xi2 = x_ft_2.real, x_ft_2.imag
+
+            # 4. Separate Weights into Real and Imaginary (c and d)
+            # weights shape is [in, out, modes, modes, 2]
+            wr1, wi1 = self.weights1[..., 0], self.weights1[..., 1]
+            wr2, wi2 = self.weights2[..., 0], self.weights2[..., 1]
+
+            # 5. Pure REAL Tensor Multiplication: (a+ib)(c+id) = (ac-bd) + i(bc+ad)
+            # These einsums are strictly float32, which ONNX loves.
+            out1_r = torch.einsum("bixy,ioxy->boxy", xr1, wr1) - torch.einsum("bixy,ioxy->boxy", xi1, wi1)
+            out1_i = torch.einsum("bixy,ioxy->boxy", xi1, wr1) + torch.einsum("bixy,ioxy->boxy", xr1, wi1)
+
+            out2_r = torch.einsum("bixy,ioxy->boxy", xr2, wr2) - torch.einsum("bixy,ioxy->boxy", xi2, wi2)
+            out2_i = torch.einsum("bixy,ioxy->boxy", xi2, wr2) + torch.einsum("bixy,ioxy->boxy", xr2, wi2)
+
+            # 6. Create standard float32 canvases
+            out_ft_real = torch.zeros(batchsize, self.out_channels, x.size(-2), x.size(-1)//2 + 1, dtype=torch.float32, device=x.device)
+            out_ft_imag = torch.zeros(batchsize, self.out_channels, x.size(-2), x.size(-1)//2 + 1, dtype=torch.float32, device=x.device)
+
+            # 7. Scatter the computed real and imaginary parts
+            out_ft_real[:, :, :self.modes1, :self.modes2] = out1_r
+            out_ft_real[:, :, -self.modes1:, :self.modes2] = out2_r
+
+            out_ft_imag[:, :, :self.modes1, :self.modes2] = out1_i
+            out_ft_imag[:, :, -self.modes1:, :self.modes2] = out2_i
+
+            # 8. Recombine safely into a complex tensor just in time for the IFFT
+            out_ft = torch.complex(out_ft_real, out_ft_imag)
+
+            # 9. Inverse FFT
+            x = torch.fft.irfft2(out_ft, s=(x.size(-2), x.size(-1)))
+
+        return x.to(orig_dtype)
+
+
+
+
+class BaseFNO2d(nn.Module):
+    def __init__(self, modes=16, width=64, in_channels=12, out_channels=10, n_layers=4):
+        super().__init__()
+        self.width = width
+        self.fc0 = nn.Linear(in_channels, width)
+        self.convs = nn.ModuleList([
+            SpectralConv2d(width, width, modes, modes) for _ in range(n_layers)
+        ])
+        self.ws = nn.ModuleList([
+            nn.Conv2d(width, width, 1) for _ in range(n_layers)
+        ])
+        self.fc1 = nn.Linear(width, 128)
+        self.fc2 = nn.Linear(128, out_channels)
+
+    def forward(self, x):
+        x = x.permute(0, 2, 3, 1)          # (B, H, W, C)
+        x = self.fc0(x)
+        x = x.permute(0, 3, 1, 2)          # (B, C, H, W)
+        for conv, w in zip(self.convs, self.ws):
+            x = F.gelu(conv(x) + w(x))
+        x = x.permute(0, 2, 3, 1)
+        x = F.gelu(self.fc1(x))
+        x = self.fc2(x)
+        x = x.permute(0, 3, 1, 2)          # (B, out_channels, H, W)
+        return x.float()  # ensure float32 for AMP
+
+# =====================================================================
+# 2. GEO-FNO (DIFFEOMORPHIC MAPPING)
+# =====================================================================
+class DiffeomorphismNet(nn.Module):
+    def __init__(self, in_channels=3, hidden_dim=32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_dim, 1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, hidden_dim, 1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, 2, 1)    # outputs (du, dv) displacement
+        )
+        # identity initialisation
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, geom_features, base_grid):
+        deformation = self.net(geom_features)            # (B, 2, H, W)
+        deformation = deformation.permute(0, 2, 3, 1)    # (B, H, W, 2)
+        latent_grid = base_grid + deformation
+        return torch.clamp(latent_grid, -1.0, 1.0)
+
+class GeoFNO(nn.Module):
+    def __init__(self, modes=16, width=64, t_in=5, t_out=10, geom_channels=3,
+                 n_theta=64, n_phi=64):
+        super().__init__()
+        # input channels: pressure history (t_in) + source history (t_in) + geometry (geom_channels)
+        in_channels = t_in + t_in + geom_channels
+        self.fno = BaseFNO2d(modes, width, in_channels, t_out)
+        self.geo_net = DiffeomorphismNet(in_channels=geom_channels)
+
+        # base uniform computational grid (normalised [-1, 1])
+        ty = torch.linspace(-1, 1, n_theta)
+        tx = torch.linspace(-1, 1, n_phi)
+        mesh_y, mesh_x = torch.meshgrid(ty, tx, indexing='ij')
+        self.register_buffer('base_grid', torch.stack((mesh_x, mesh_y), dim=-1).unsqueeze(0))
+
+    def forward(self, p_in, s_in, geom_features):
+        # p_in, s_in: (B, T_in, H, W)
+        # geom_features: (B, C_geom, H, W)
+        B = p_in.shape[0]
+        base_grid_b = self.base_grid.expand(B, -1, -1, -1)
+
+        # 1. learn spatial deformation from physical to flat latent space
+        latent_grid = self.geo_net(geom_features, base_grid_b)
+
+        # 2. warp physical fields into latent space
+        x_physical = torch.cat([p_in, s_in, geom_features], dim=1)
+        x_latent = F.grid_sample(x_physical, latent_grid,
+                                 mode='bilinear', padding_mode='border', align_corners=True)
+
+        # 3. vectorised time stepping in latent space
+        p_out_latent = self.fno(x_latent)   # (B, T_out, H, W)
+
+        # 4. warp prediction back to physical torus (identity grid)
+        p_out_physical = F.grid_sample(p_out_latent, base_grid_b,
+                                       mode='bilinear', padding_mode='border', align_corners=True)
+
+        return p_out_physical.float()      # ensure float32 for loss
+
+# =====================================================================
+# 3. CHUNKED DATASET (VECTORIZED TIME WINDOWS)
+# =====================================================================
+class ChunkedTorusDataset(Dataset):
+    def __init__(self, h5_path, t_in=5, t_out=10):
+        with h5py.File(h5_path, 'r') as f:
+            # squeeze channel dimension
+            self.P_raw = torch.from_numpy(f['pressure'][:])[..., 0].permute(0, 1, 3, 2)
+            self.S_raw = torch.from_numpy(f['source'][:])[..., 0].permute(0, 1, 3, 2)
+            self.R = f.attrs.get('R', 3.0)
+            self.r = f.attrs.get('r', 1.0)
+            self.N_theta = f.attrs.get('N_theta', 64)
+            self.N_phi   = f.attrs.get('N_phi', 64)
+
+        self.t_in = t_in
+        self.t_out = t_out
+        self.num_rollouts = self.P_raw.shape[0]
+        self.time_steps = self.P_raw.shape[1]
+        self.chunk_size = t_in + t_out
+        self.valid_starts = self.time_steps - self.chunk_size
+
+        # global max scaling (keeps inputs roughly in [-1, 1])
+        self.p_scale = torch.clamp(torch.max(torch.abs(self.P_raw)), min=1e-4)
+        self.s_scale = torch.clamp(torch.max(torch.abs(self.S_raw)), min=1e-4)
+
+        # static geometry: normalised metric, theta, phi
+        theta = torch.linspace(0, 2*np.pi, self.N_theta+1)[:-1]
+        phi   = torch.linspace(0, 2*np.pi, self.N_phi+1)[:-1]
+        THETA, PHI = torch.meshgrid(theta, phi, indexing='ij')
+        metric = self.r * (self.R + self.r * torch.cos(THETA))
+        m_norm = (metric - metric.min()) / (metric.max() - metric.min())
+        self.geom_features = torch.stack([m_norm, THETA/(2*np.pi), PHI/(2*np.pi)], dim=0).float()
+
+    def __len__(self):
+        return self.num_rollouts * self.valid_starts
+
+    def __getitem__(self, idx):
+        rollout = idx // self.valid_starts
+        t_start = idx % self.valid_starts
+
+        # input and source history
+        p_in = self.P_raw[rollout, t_start : t_start+self.t_in] / self.p_scale
+        s_in = self.S_raw[rollout, t_start : t_start+self.t_in] / self.s_scale
+
+        # target future pressure
+        p_out = self.P_raw[rollout, t_start+self.t_in : t_start+self.chunk_size] / self.p_scale
+
+        return p_in.float(), s_in.float(), self.geom_features, p_out.float()
+
+# =====================================================================
+# 4. TRAINER WITH EVALUATION, BEST MODEL & PERIODIC CHECKPOINTS
+# =====================================================================
+class FastTrainer:
+    def __init__(self, model, lr=1e-3, weight_decay=1e-5):
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = model.to(self.device)
+        self.optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+        self.criterion = nn.MSELoss()
+        self.scaler = GradScaler('cuda', enabled=(self.device.type == 'cuda'))
+
+        # State Tracking
+        self.history = {'train_loss': [], 'val_loss': []}
+        self.best_val_loss = float('inf')
+        self.best_epoch = 0
+        self.start_epoch = 1
+
+    def load_checkpoint(self, checkpoint_path):
+        """Restores model, optimizer, scaler, and history from a serialized state."""
+        if not os.path.exists(checkpoint_path):
+            print(f"[WARNING] Target checkpoint missing at: {checkpoint_path}. Initializing fresh weights.")
+            return
+
+        print(f"\n[SYSTEM] Mounting CHORUS model checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+
+        # 1. Restore Network & Optimizer States
+        self.model.load_state_dict(checkpoint.get('model_state_dict', checkpoint))
+
+        if 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'scaler_state_dict' in checkpoint:
+            self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+
+        # 2. Restore Historical Tracking
+        self.start_epoch = checkpoint.get('epoch', 0) + 1
+        self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        self.best_epoch = checkpoint.get('epoch', 0)
+
+        if 'history' in checkpoint:
+            self.history = checkpoint['history']
+
+        print(f"  └─> Architecture restored. Resuming optimization from Epoch {self.start_epoch}.")
+        print(f"  └─> Previous Best Validation Loss: {self.best_val_loss:.6f}\n")
+
+    def train_epoch(self, loader):
+        self.model.train()
+        total_loss = 0.0
+        for batch_idx, (p_in, s_in, geom, p_target) in enumerate(loader):
+            p_in, s_in = p_in.to(self.device), s_in.to(self.device)
+            geom, p_target = geom.to(self.device), p_target.to(self.device)
+
+            self.optimizer.zero_grad(set_to_none=True)
+            with autocast(self.device.type, enabled=(self.device.type == 'cuda')):
+                p_pred = self.model(p_in, s_in, geom)
+                loss = self.criterion(p_pred, p_target)
+
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            total_loss += loss.item()
+            if (batch_idx+1) % max(1, len(loader)//5) == 0 or batch_idx+1 == len(loader):
+                sys.stdout.write(f"\r  Batch {batch_idx+1:03d}/{len(loader)} | Active Rolling MSE: {loss.item():.6f}")
+                sys.stdout.flush()
+        print()
+        return total_loss / len(loader)
+
+    @torch.no_grad()
+    def evaluate(self, loader):
+        self.model.eval()
+        total_loss = 0.0
+        for p_in, s_in, geom, p_target in loader:
+            p_in, s_in = p_in.to(self.device), s_in.to(self.device)
+            geom, p_target = geom.to(self.device), p_target.to(self.device)
+            with autocast(self.device.type, enabled=(self.device.type == 'cuda')):
+                p_pred = self.model(p_in, s_in, geom)
+                loss = self.criterion(p_pred, p_target)
+            total_loss += loss.item()
+        return total_loss / len(loader)
+
+    def fit(self, train_loader, val_loader, total_target_epochs, dataset_meta=None,
+            save_best_path="./best_geofno.pt", save_every=50,
+            checkpoint_dir="./checkpoints", print_every=1):
+
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Adjust scheduler to account for resumed epochs if starting mid-way
+        last_epoch_idx = self.start_epoch - 2 if self.start_epoch > 1 else -1
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=total_target_epochs, last_epoch=last_epoch_idx)
+
+        # Standardize the metadata payload
+        if dataset_meta is None:
+            dataset_meta = {"warning": "No dataset metadata provided during training."}
+
+        print(f"=== Initiating Training Loop (Targeting {total_target_epochs} Total Epochs) ===")
+
+        for epoch in range(self.start_epoch, total_target_epochs + 1):
+            train_loss = self.train_epoch(train_loader)
+            val_loss = self.evaluate(val_loader) if val_loader is not None else float('nan')
+
+            self.history['train_loss'].append(train_loss)
+            self.history['val_loss'].append(val_loss)
+            scheduler.step()
+
+            if epoch % print_every == 0:
+                lr = scheduler.get_last_lr()[0]
+                print(f"[Epoch {epoch:04d}/{total_target_epochs}] LR: {lr:.2e} | Train MSE: {train_loss:.6f} | Val MSE: {val_loss:.6f}")
+
+            # Define the rich serialization payload
+            save_payload = {
+                'project': 'CHORUS_Operator_Mapping',
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'scaler_state_dict': self.scaler.state_dict(),
+                'history': self.history,
+                'best_val_loss': self.best_val_loss,
+                'dataset_configuration': dataset_meta
+            }
+
+            # Save best model
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self.best_epoch = epoch
+                save_payload['best_val_loss'] = val_loss
+
+                torch.save(save_payload, save_best_path)
+
+                print(f"  └─> [UPDATE] New historical best model archived. (Val Loss: {val_loss:.6f})")
+
+            # Periodic checkpointing
+            if epoch % save_every == 0:
+                ckpt_path = os.path.join(checkpoint_dir, f"geofno_epoch_{epoch}.pt")
+                torch.save(save_payload, ckpt_path)
+                print(f"  └─> [SNAPSHOT] Periodic state saved to {ckpt_path}")
+
+        print(f"\n=== Execution Terminated. Global Best Val Loss: {self.best_val_loss:.6f} (Achieved at Epoch {self.best_epoch}) ===")
+
+
+# =====================================================================
+# 5. MAIN PIPELINE
+# =====================================================================
+def run_fast_pipeline(h5_file_path):
+    # ---------- hyperparameters ----------
+    T_IN = 3
+    T_OUT = 30
+    BATCH_SIZE = 8
+    EPOCHS = 50
+    LR = 1e-3
+    WD = 1e-5
+
+    # ---------- dataset ----------
+    print("Loading dataset ...")
+    full_ds = ChunkedTorusDataset(h5_file_path, t_in=T_IN, t_out=T_OUT)
+    print(f"Original dataset:")
+    print(f"  Rollouts: {full_ds.num_rollouts}, time steps: {full_ds.time_steps}")
+    print(f"  T_in: {T_IN}, T_out: {T_OUT}, chunk size: {full_ds.chunk_size}")
+    print(f"  Valid windows per rollout: {full_ds.valid_starts}")
+    print(f"  Total windows: {len(full_ds)}")
+    print(f"  Grid: {full_ds.N_theta} x {full_ds.N_phi}")
+    print(f"  Global scaling: p_scale={full_ds.p_scale:.3f}, s_scale={full_ds.s_scale:.3f}")
+
+    # ---------- split by rollout (no leakage) ----------
+    n_rollouts = full_ds.num_rollouts
+    rollout_indices = np.arange(n_rollouts)
+    train_roll, val_roll = train_test_split(rollout_indices, test_size=0.2, random_state=42)
+
+    # collect window indices for each split
+    vs = full_ds.valid_starts
+    train_win = [r * vs + t for r in train_roll for t in range(vs)]
+    val_win   = [r * vs + t for r in val_roll   for t in range(vs)]
+
+    train_ds = Subset(full_ds, train_win)
+    val_ds   = Subset(full_ds, val_win)
+
+    print(f"\nStratified split (by rollout):")
+    print(f"  Train rollouts: {len(train_roll)}, windows: {len(train_ds)}")
+    print(f"  Val   rollouts: {len(val_roll)}, windows: {len(val_ds)}")
+
+    # ---------- data loaders ----------
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
+                              pin_memory=True, num_workers=2, drop_last=True)
+    val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
+                              pin_memory=True, num_workers=2)
+
+    # ---------- model ----------
+    model = GeoFNO(modes=20, width=48, t_in=T_IN, t_out=T_OUT, geom_channels=3,
+                   n_theta=full_ds.N_theta, n_phi=full_ds.N_phi)
+    print(f"\nModel: GeoFNO | params: {sum(p.numel() for p in model.parameters()):,}")
+
+    # ---------- trainer ----------
+    trainer = FastTrainer(model, lr=LR, weight_decay=WD)
+    print(f"Training on {trainer.device.type.upper()}\n")
+
+    # ---------- launch ----------
+    trainer.fit(
+        train_loader, val_loader,
+        total_target_epochs=EPOCHS,
+        save_best_path="./best_geofno_small_20_48.pt",
+        save_every=20,
+        checkpoint_dir="./checkpoints",
+        print_every=5
+    )
+
+    # ---------- final save ----------
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'trainer_history': trainer.history,
+    }, "./geofno_small_20_48.pt")
+    print("\nFinal model saved. Done.")
+
+# ===========================================================
