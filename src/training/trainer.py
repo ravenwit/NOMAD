@@ -1,83 +1,138 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
-from src.numerical.operators import compute_laplace_beltrami
-from src.numerical.geometry import TorusGeometry
+from torch.cuda.amp import autocast, GradScaler
+import os
+import sys
 
-class PhysicsInformedTrainer:
-    """
-    Unified trainer for Physics-Informed Neural Networks on a Torus.
-    Calculates PDE residuals and handles the training loop.
-    """
-    def __init__(self, model, R=3.0, r=1.0, c=343.0, dt=0.001, lr=1e-4):
+class FastTrainer:
+    def __init__(self, model, lr=1e-3, weight_decay=1e-5):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = model.to(self.device)
-        self.geometry = TorusGeometry(R, r)
-        self.c = c
-        self.dt = dt
-        self.optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-5)
-        self.mse_loss = nn.MSELoss()
-        
-    def train_epoch(self, dataloader, pde_lambda=0.5):
+        self.optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+        self.criterion = nn.MSELoss()
+        self.scaler = GradScaler('cuda', enabled=(self.device.type == 'cuda'))
+
+        # State Tracking
+        self.history = {'train_loss': [], 'val_loss': []}
+        self.best_val_loss = float('inf')
+        self.best_epoch = 0
+        self.start_epoch = 1
+
+    def load_checkpoint(self, checkpoint_path):
+        """Restores model, optimizer, scaler, and history from a serialized state."""
+        if not os.path.exists(checkpoint_path):
+            print(f"[WARNING] Target checkpoint missing at: {checkpoint_path}. Initializing fresh weights.")
+            return
+
+        print(f"\n[SYSTEM] Mounting CHORUS model checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+
+        # 1. Restore Network & Optimizer States
+        self.model.load_state_dict(checkpoint.get('model_state_dict', checkpoint))
+
+        if 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'scaler_state_dict' in checkpoint:
+            self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+
+        # 2. Restore Historical Tracking
+        self.start_epoch = checkpoint.get('epoch', 0) + 1
+        self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        self.best_epoch = checkpoint.get('epoch', 0)
+
+        if 'history' in checkpoint:
+            self.history = checkpoint['history']
+
+        print(f"  └─> Architecture restored. Resuming optimization from Epoch {self.start_epoch}.")
+        print(f"  └─> Previous Best Validation Loss: {self.best_val_loss:.6f}\n")
+
+    def train_epoch(self, loader):
         self.model.train()
-        total_loss = 0
-        
-        # Grid steps for LB
-        # Use first batch to get resolution
-        for s_seq, p_seq in dataloader:
-            N_theta, N_phi = p_seq.shape[-2:]
-            dx = (2 * np.pi) / N_theta
-            dy = (2 * np.pi) / N_phi
-            break
+        total_loss = 0.0
+        for batch_idx, (p_in, s_in, geom, p_target) in enumerate(loader):
+            p_in, s_in = p_in.to(self.device), s_in.to(self.device)
+            geom, p_target = geom.to(self.device), p_target.to(self.device)
 
-        for s_seq, p_seq in dataloader:
-            s_seq, p_seq = s_seq.to(self.device), p_seq.to(self.device)
-            
-            # Sample a random triplet in time
-            t_idx = np.random.randint(1, p_seq.shape[1] - 1)
-            
-            p_prev = p_seq[:, t_idx-1]
-            p_curr = p_seq[:, t_idx]
-            p_next_target = p_seq[:, t_idx+1]
-            s_curr = s_seq[:, t_idx]
-            
-            # Pack input: [u_t, u_{t-1}]
-            # We predict u_{t+1}
-            x_in = torch.cat([p_curr[:, :1], p_prev[:, :1]], dim=1)
-            p_next_pred = self.model(x_in)
-            
-            # Data Loss
-            loss_data = self.mse_loss(p_next_pred, p_next_target[:, :1])
-            
-            # PDE Residual Loss
-            # DENORMALIZATION (Assuming the dataset handles this, otherwise we might need a mapping)
-            # For simplicity in this unified trainer, we assume inputs are already in physical units 
-            # if we want the PDE loss to be meaningful, or we use normalized units.
-            # Here we assume normalized units where c is adjusted or the data is denormalized elsewhere.
-            # In NOMAD we usually denormalize as seen in train_pinn.py.
-            # However, since this trainer doesn't have the dataset object, we might need to pass it or 
-            # expect normalized physical units.
-            
-            # Let's assume normalized units for now or pass scale factors.
-            # To match train_pinn.py exactly, let's assume we pass denormalize functions or the dataset.
-            
-            # For the sake of the class, let's just use the current tensors.
-            u_tt = (p_next_pred - 2*p_curr[:, :1] + p_prev[:, :1]) / (self.dt**2)
-            laplacian = compute_laplace_beltrami(p_curr[:, :1], self.geometry, dx, dy)
-            loss_pde = torch.mean((u_tt - (self.c**2) * (laplacian + s_curr[:, :1]))**2)
-            
-            batch_loss = loss_data + pde_lambda * loss_pde
-            
-            self.optimizer.zero_grad()
-            batch_loss.backward()
-            self.optimizer.step()
-            
-            total_loss += batch_loss.item()
-            
-        return total_loss / len(dataloader)
+            self.optimizer.zero_grad(set_to_none=True)
+            with autocast(self.device.type, enabled=(self.device.type == 'cuda')):
+                p_pred = self.model(p_in, s_in, geom)
+                loss = self.criterion(p_pred, p_target)
 
-    def train_epochs(self, dataloader, epochs=10, pde_lambda=0.5):
-        for epoch in range(epochs):
-            avg_loss = self.train_epoch(dataloader, pde_lambda)
-            print(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.6f}")
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            total_loss += loss.item()
+            if (batch_idx+1) % max(1, len(loader)//5) == 0 or batch_idx+1 == len(loader):
+                sys.stdout.write(f"\r  Batch {batch_idx+1:03d}/{len(loader)} | Active Rolling MSE: {loss.item():.6f}")
+                sys.stdout.flush()
+        print()
+        return total_loss / len(loader)
+
+    @torch.no_grad()
+    def evaluate(self, loader):
+        self.model.eval()
+        total_loss = 0.0
+        for p_in, s_in, geom, p_target in loader:
+            p_in, s_in = p_in.to(self.device), s_in.to(self.device)
+            geom, p_target = geom.to(self.device), p_target.to(self.device)
+            with autocast(self.device.type, enabled=(self.device.type == 'cuda')):
+                p_pred = self.model(p_in, s_in, geom)
+                loss = self.criterion(p_pred, p_target)
+            total_loss += loss.item()
+        return total_loss / len(loader)
+
+    def fit(self, train_loader, val_loader, total_target_epochs, dataset_meta=None,
+            save_best_path="./best_geofno.pt", save_every=50,
+            checkpoint_dir="./checkpoints", print_every=1):
+
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Adjust scheduler to account for resumed epochs if starting mid-way
+        last_epoch_idx = self.start_epoch - 2 if self.start_epoch > 1 else -1
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=total_target_epochs, last_epoch=last_epoch_idx)
+
+        if dataset_meta is None:
+            dataset_meta = {"warning": "No dataset metadata provided during training."}
+
+        print(f"=== Initiating Training Loop (Targeting {total_target_epochs} Total Epochs) ===")
+
+        for epoch in range(self.start_epoch, total_target_epochs + 1):
+            train_loss = self.train_epoch(train_loader)
+            val_loss = self.evaluate(val_loader) if val_loader is not None else float('nan')
+
+            self.history['train_loss'].append(train_loss)
+            self.history['val_loss'].append(val_loss)
+            scheduler.step()
+
+            if epoch % print_every == 0:
+                lr = scheduler.get_last_lr()[0]
+                print(f"[Epoch {epoch:04d}/{total_target_epochs}] LR: {lr:.2e} | Train MSE: {train_loss:.6f} | Val MSE: {val_loss:.6f}")
+
+            save_payload = {
+                'project': 'CHORUS_Operator_Mapping',
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'scaler_state_dict': self.scaler.state_dict(),
+                'history': self.history,
+                'best_val_loss': self.best_val_loss,
+                'dataset_configuration': dataset_meta
+            }
+
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self.best_epoch = epoch
+                save_payload['best_val_loss'] = val_loss
+                torch.save(save_payload, save_best_path)
+                print(f"  └─> [UPDATE] New historical best model archived. (Val Loss: {val_loss:.6f})")
+
+            if epoch % save_every == 0:
+                ckpt_path = os.path.join(checkpoint_dir, f"geofno_epoch_{epoch}.pt")
+                torch.save(save_payload, ckpt_path)
+                print(f"  └─> [SNAPSHOT] Periodic state saved to {ckpt_path}")
+
+        print(f"\n=== Execution Terminated. Global Best Val Loss: {self.best_val_loss:.6f} (Achieved at Epoch {self.best_epoch}) ===")
