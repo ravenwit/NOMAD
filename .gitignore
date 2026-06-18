@@ -2,6 +2,6 @@
 *.pt 
 
 rule.md
-__pycache__
-.agents
+__pycache__/
+.agents/
 
