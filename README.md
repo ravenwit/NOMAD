@@ -143,3 +143,5 @@ For an elaborate theoretical breakdown of:
 - How the Geo-FNO resolves these topological limitations.
 
 Please read the formal paper and empirical results located in [report/nomad.md](report/nomad.md).
+
+_Assisted by Gemini Pro 3.1_
