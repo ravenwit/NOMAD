@@ -1,7 +1,7 @@
 <div align="center">
   
 # 🌊 NOMAD 
-**Neural Operator for Manifold Acoustic Dynamics**
+**Neural Operator Mapping for Acoustic Dynamics**
 
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c?logo=pytorch&logoColor=white)](#)
 [![React](https://img.shields.io/badge/React-UI-61dafb?logo=react&logoColor=black)](#)
@@ -61,6 +61,7 @@ Navigate to the web directory and install the UI dependencies:
 ```bash
 cd web
 npm install
+npm run dev
 ```
 
 ---
