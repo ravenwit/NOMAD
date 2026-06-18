@@ -63,7 +63,7 @@ The determinant of the metric, $|g| = \det(g)$, dictates the local area volume e
 
 $$ \sqrt{|g|} = r(R + r\cos\theta) $$
 
-![Torus Geometry and Metric](/Users/raven/Projects/NOMAD/report/fig1_torus_geometry.png)
+![Torus Geometry and Metric](figures/fig1_torus_geometry.png)
 *Figure 1: (A) The 3D surface of the toroidal manifold. (B) The heterogeneous metric determinant $\sqrt{|g|}$ mapped across the $(\theta, \phi)$ plane. Notice the significant variation in the area element; the physical distance per radian is much smaller at the inner equator ($\theta = \pi$) than the outer equator ($\theta = 0, 2\pi$).*
 
 ---
@@ -120,17 +120,17 @@ $$ S_{\text{space}}(\rho) = \left( 1 - \frac{\rho^2}{\sigma_s^2} \right) \exp\le
 
 Where $\rho^2 \approx (r \Delta\theta)^2 + ((R + r\cos\theta_0) \Delta\phi)^2$ approximates the localized manifold distance. 
 
-![Ricker Wavelet](/Users/raven/Projects/NOMAD/report/fig2_ricker_wavelet.png)
+![Ricker Wavelet](figures/fig2_ricker_wavelet.png)
 *Figure 2: The Ricker Wavelet in space and time. Its zero-mean spatial property stabilizes the closed-manifold simulation.*
 
-![Wave Propagation](/Users/raven/Projects/NOMAD/report/fig3_wave_propagation.png)
+![Wave Propagation](figures/fig3_wave_propagation.png)
 *Figure 3: Simulated wave propagation. The dispersion is highly anisotropic due to the changing metric tensor, traveling faster along the compressed inner equator geometry.*
 
 ### 3.1 Complex Chaos Dataset
 
 To ensure the neural operators learn the true physical PDE operator mapping $\mathcal{G}: \mathcal{A} \to \mathcal{U}$ rather than overfitting to a single stationary point source, we generate initial conditions characterized by randomized superpositions of continuous spatial frequencies.
 
-![Complex Chaos Dataset](/Users/raven/Projects/NOMAD/report/plot_complex_chaos.png)
+![Complex Chaos Dataset](figures/plot_complex_chaos.png)
 *Figure 4: A representative sample from the Complex Chaos dataset, illustrating highly non-linear, multi-modal initial wave states.*
 
 ---
@@ -169,7 +169,7 @@ $$ \mathcal{Y}_{r} = X_{r} W_{r} - X_{i} W_{i}, \quad \mathcal{Y}_{i} = X_{i} W_
 
 To resolve the theoretical limits of translation-invariant architectures on curved manifolds, the Geo-FNO maps the physical domain $\Omega_{\text{phys}} = \mathbb{T}^2$ to a flat latent domain $\Omega_{\text{latent}} = [-1, 1]^2$ using a learned diffeomorphism $\varphi: \Omega_{\text{phys}} \to \Omega_{\text{latent}}$.
 
-![Diffeomorphism Network](/Users/raven/Projects/NOMAD/report/diffeomorphic_mapping_net.png)
+![Diffeomorphism Network](figures/diffeomorphic_mapping_net.png)
 *Figure 5: The architectural pipeline. A lightweight fully convolutional DiffeomorphismNet learns a deformation field $\delta(\mathbf{x})$ directly from the normalized metric tensor, determining the optimal latent mapping.*
 
 The Geo-FNO mechanism proceeds in four stages:
@@ -180,20 +180,85 @@ The Geo-FNO mechanism proceeds in four stages:
 3. **Latent FNO:** The FNO operates on $P_{\text{latent}}$. Because $\varphi$ has absorbed the metric heterogeneity—such that the pullback metric $(\varphi^* g)_{ij} \approx \delta_{ij}$—the effective kernel $\tilde{\kappa}$ is now approximately translation-invariant, perfectly aligning with the foundational assumptions of the FNO.
 4. **Pushforward:** The predicted future state is pushed back to the physical torus.
 
-![Latent Grid](/Users/raven/Projects/NOMAD/report/fig5_latent_grid.png)
+![Latent Grid](figures/fig5_latent_grid.png)
 *Figure 6: The learned latent coordinate grid $\varphi(\mathbf{x})$. The network learns to "unwrap" and distort the parameterization space specifically to flatten the variations caused by the toroidal metric determinant.*
 
 ---
 
 ## 6. Quantitative Results
 
-The integration of the diffeomorphic mapping yields radical improvements in generalization capabilities over structurally complex wave propagation states.
+The integration of the diffeomorphic mapping yields radical improvements in generalization capabilities over structurally complex wave propagation states. In our evaluations, we tested two model capacities: a **Small Model** (trained with 20 Fourier modes and a width of 48) and a **Big Model** (trained with 24 Fourier modes and a width of 128). We evaluate their performance on varying spatial resolutions, highlighting both their temporal L2 error accumulation and their visual prediction fidelity.
 
-![Loss Convergence](/Users/raven/Projects/NOMAD/report/geofno128x128_loss.png)
-*Figure 7: Training and validation loss curves on the $128 \times 128$ resolution grid. Notice how the Periodic U-Net plateau's early, and the Vanilla FNO severely overfits (huge validation gap). The Geo-FNO remains stable, successfully modeling the unseen data.*
+### 6.1 L2 Error Over Prediction Sequence
 
-![Spatial Generalization Error](/Users/raven/Projects/NOMAD/report/geofno128x128.png)
-*Figure 8: Spatial absolute error across unseen test initial conditions. The Geo-FNO predicts the future acoustic state almost perfectly, while the translation-invariant architectures accumulate massive error at the inner equator (where metric deformation is maximum).*
+The following plots demonstrate the relative L2 error calculated over the autoregressive prediction sequence. Unlike training loss curves, these explicitly measure how temporal errors compound as the model predicts further into the future during evaluation.
+
+**Small Model (Modes: 20, Width: 48)**
+
+![L2 Error 64x64 Small](figures/geofno64x64_small_loss.png)
+*Figure 7a: L2 error accumulation for the small model evaluated at $64 \times 64$ resolution.*
+
+![L2 Error 256x256 Small](figures/geofno256x256_small_loss.png)
+*Figure 7b: L2 error accumulation for the small model evaluated at $256 \times 256$ resolution.*
+
+**Big Model (Modes: 24, Width: 128)**
+
+![L2 Error 64x64 Big](figures/geofno64x64_loss.png)
+*Figure 7c: L2 error accumulation for the big model evaluated at $64 \times 64$ resolution.*
+
+![L2 Error 128x128 Big](figures/geofno128x128_loss.png)
+*Figure 7d: L2 error accumulation for the big model evaluated at $128 \times 128$ resolution.*
+
+![L2 Error 256x256 Big](figures/geofno256x256_loss.png)
+*Figure 7e: L2 error accumulation for the big model evaluated at $256 \times 256$ resolution.*
+
+### 6.2 Predicted Sequence Visualizations
+
+To qualitatively verify the physical wave propagation, we visualize the predicted acoustic field sequence against the ground-truth spectral simulation. The Geo-FNO demonstrates a robust capacity to capture complex interactions without severe spatial degradation.
+
+**Small Model (Modes: 20, Width: 48)**
+
+![Spatial Prediction 64x64 Small](figures/geofno64x64_small.png)
+*Figure 8a: Visualized prediction sequence for the small model at $64 \times 64$ resolution.*
+
+![Spatial Prediction 256x256 Small](figures/geofno256x256_small.png)
+*Figure 8b: Visualized prediction sequence for the small model at $256 \times 256$ resolution.*
+
+**Big Model (Modes: 24, Width: 128)**
+
+![Spatial Prediction 64x64 Big](figures/geofno64x64.png)
+*Figure 8c: Visualized prediction sequence for the big model at $64 \times 64$ resolution.*
+
+![Spatial Prediction 128x128 Big](figures/geofno128x128.png)
+*Figure 8d: Visualized prediction sequence for the big model at $128 \times 128$ resolution.*
+
+![Spatial Prediction 256x256 Big](figures/geofno256x256.png)
+*Figure 8e: Visualized prediction sequence for the big model at $256 \times 256$ resolution.*
+
+---
+
+### 6.3 Energy Conservation Analysis
+
+A critical metric for long-term physical simulation stability is energy conservation. The following plots track the total system energy integrated over the manifold for both the ground-truth simulation and the model's prediction sequence. A stable model will successfully preserve energy across time steps without catastrophic exponential explosion or artificial dampening.
+
+**Small Model (Modes: 20, Width: 48)**
+
+![Energy Convergence Small 64x64](figures/energy_conv_small_64x64.png)
+*Figure 9a: Energy tracking for the small model at $64 \times 64$ resolution.*
+
+![Energy Convergence Small 256x256](figures/energy_conv_small_256x256.png)
+*Figure 9b: Energy tracking for the small model at $256 \times 256$ resolution.*
+
+**Big Model (Modes: 24, Width: 128)**
+
+![Energy Convergence Big 64x64](figures/energy_conv_big_64x64.png)
+*Figure 9c: Energy tracking for the big model at $64 \times 64$ resolution.*
+
+![Energy Convergence Big 128x128](figures/energy_conv_big_128x128.png)
+*Figure 9d: Energy tracking for the big model at $128 \times 128$ resolution.*
+
+![Energy Convergence Big 256x256](figures/energy_conv_big_256x256.png)
+*Figure 9e: Energy tracking for the big model at $256 \times 256$ resolution.*
 
 ---
 

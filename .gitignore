@@ -1,7 +1,7 @@
 
 *.pt 
 
-
+rule.md
 __pycache__
 .agents
 
