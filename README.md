@@ -15,7 +15,7 @@
 
 ## 📖 Overview
 
-NOMAD is a physics-informed Scientific Machine Learning (SciML) pipeline designed to formally simulate and predict acoustic wave propagation on a closed toroidal manifold ($\mathbb{T}^2$) utilizing a **Geometry-Aware Fourier Neural Operator (Geo-FNO)**. 
+NOMAD is a fully data driven (next development will be physics-informed) Scientific Machine Learning (SciML) pipeline designed to formally simulate and predict acoustic wave propagation on a closed toroidal manifold ($\mathbb{T}^2$) utilizing a **Geometry-Aware Fourier Neural Operator (Geo-FNO)**. 
 
 Traditional translation-invariant networks (like CNNs or vanilla FNOs) fail mathematically on curved surfaces due to heterogeneous metric tensors. NOMAD solves this by learning a **Diffeomorphic Pullback**, mapping the physical curved manifold into a flat latent space where the PDE operator is translationally invariant.
 
