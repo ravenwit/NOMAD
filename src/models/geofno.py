@@ -2,9 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .fno import BaseFNO2d
+from typing import Optional, Tuple
 
 class DiffeomorphismNet(nn.Module):
-    def __init__(self, in_channels=3, hidden_dim=32):
+    def __init__(self, in_channels: int = 3, hidden_dim: int = 32):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(in_channels, hidden_dim, 1),
@@ -17,15 +18,15 @@ class DiffeomorphismNet(nn.Module):
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
 
-    def forward(self, geom_features, base_grid):
+    def forward(self, geom_features: torch.Tensor, base_grid: torch.Tensor) -> torch.Tensor:
         deformation = self.net(geom_features)            # (B, 2, H, W)
         deformation = deformation.permute(0, 2, 3, 1)    # (B, H, W, 2)
         latent_grid = base_grid + deformation
         return torch.clamp(latent_grid, -1.0, 1.0)
 
 class GeoFNO(nn.Module):
-    def __init__(self, modes=16, width=64, t_in=5, t_out=10, geom_channels=3,
-                 n_theta=64, n_phi=64):
+    def __init__(self, modes: int = 16, width: int = 64, t_in: int = 5, t_out: int = 10, geom_channels: int = 3,
+                 n_theta: int = 64, n_phi: int = 64):
         super().__init__()
         # input channels: pressure history (t_in) + source history (t_in) + geometry (geom_channels)
         in_channels = t_in + t_in + geom_channels
@@ -38,7 +39,7 @@ class GeoFNO(nn.Module):
         mesh_y, mesh_x = torch.meshgrid(ty, tx, indexing='ij')
         self.register_buffer('base_grid', torch.stack((mesh_x, mesh_y), dim=-1).unsqueeze(0))
 
-    def forward(self, p_in, s_in, geom_features):
+    def forward(self, p_in: torch.Tensor, s_in: torch.Tensor, geom_features: torch.Tensor) -> torch.Tensor:
         # p_in, s_in: (B, T_in, H, W)
         # geom_features: (B, C_geom, H, W)
         B = p_in.shape[0]
@@ -60,3 +61,4 @@ class GeoFNO(nn.Module):
                                        mode='bilinear', padding_mode='border', align_corners=True)
 
         return p_out_physical.float()      # ensure float32 for loss
+

@@ -1,0 +1,27 @@
+data_path: "torus_simulation_data_multipulse_128_bench.h5"
+
+generation:
+  num_rollouts: 5
+  train_res: 128
+  record_every_base: 5
+  steps_base: 1500
+  R: 3.0
+  r: 1.0
+
+training:
+  t_in: 3
+  t_out: 30
+  unroll_steps: 1
+  batch_size: 8
+  epochs: 50
+  lr: 0.001
+  wd: 0.00001
+  modes: 24
+  width: 128
+
+evaluation:
+  data_path: "torus_simulation_data_multipulse_256_eval.h5"
+  eval_res: 256
+  num_rollouts: 2
+  target_idx: 1
+  max_eval_steps: 299
