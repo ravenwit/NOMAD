@@ -6,7 +6,7 @@ export class HuggingFaceInference {
   private playbackIndex: number = 0;
   
   private ready: boolean = false;
-  private isPredicting: boolean = false;
+  
   private lastInferenceMs: number = 0;
 
   constructor() {
@@ -32,7 +32,7 @@ export class HuggingFaceInference {
     const theta0 = theta0_uv * 2.0 * Math.PI;
     const phi0 = phi0_uv * 2.0 * Math.PI;
 
-    this.isPredicting = true;
+    
     const t0 = performance.now();
     try {
       const result = await this.client.predict("/run_simulation", {
@@ -48,7 +48,7 @@ export class HuggingFaceInference {
     } catch (e) {
       console.error("HuggingFace inference failed:", e);
     } finally {
-      this.isPredicting = false;
+      
     }
   }
 

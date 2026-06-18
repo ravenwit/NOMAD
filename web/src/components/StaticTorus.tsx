@@ -33,7 +33,7 @@ export const StaticTorus: React.FC<StaticTorusProps> = ({
       if (texture.image.width !== res) {
           texture.image.width = res;
           texture.image.height = res;
-          texture.image.data = new Float32Array(res * res);
+          texture.image.data = new Float32Array(res * res) as any;
           texture.needsUpdate = true;
       }
   }, [res, texture]);
@@ -73,6 +73,19 @@ export const StaticTorus: React.FC<StaticTorusProps> = ({
         fragmentShader={
             // Inject error mode color logic into fragment shader
             'uniform float isErrorMode;\nuniform float gain;\n' +
+            `
+            vec3 heatmap(float t) {
+                // Brighter c0 so the torus is never completely invisible (empty)
+                vec3 c0 = vec3(0.05, 0.05, 0.15); 
+                vec3 c1 = vec3(0.8, 0.1, 0.2);
+                vec3 c2 = vec3(1.0, 0.8, 0.1);
+                vec3 c3 = vec3(1.0, 1.0, 1.0);
+                
+                if (t < 0.33) return mix(c0, c1, t * 3.0);
+                if (t < 0.66) return mix(c1, c2, (t - 0.33) * 3.0);
+                return mix(c2, c3, (t - 0.66) * 3.0);
+            }
+            ` +
             fragmentShader.replace(
                 'float gain = 30.0;',
                 '' // Remove hardcoded gain, use the uniform
@@ -80,8 +93,8 @@ export const StaticTorus: React.FC<StaticTorusProps> = ({
                 'gl_FragColor = vec4(finalColor * intensity, 1.0);',
                 `
                 if (isErrorMode > 0.5) {
-                    // Error map: Red for positive error, Blue for negative
-                    vec3 errColor = wave > 0.0 ? vec3(wave*10.0, 0.0, 0.0) : vec3(0.0, 0.0, -wave*10.0);
+                    float t = clamp(abs(wave) * gain, 0.0, 1.0);
+                    vec3 errColor = heatmap(t);
                     vec3 finalErr = errColor * (ambient + diffuse) + specular + rimLight;
                     gl_FragColor = vec4(finalErr * intensity, 1.0);
                 } else {

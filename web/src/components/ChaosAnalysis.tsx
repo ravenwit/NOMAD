@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Stars } from '@react-three/drei';
 import { StaticTorus } from './StaticTorus';
@@ -19,7 +19,6 @@ export const ChaosAnalysis: React.FC = () => {
     
     const [currentFrame, setCurrentFrame] = useState(0);
     const [isPlaying, setIsPlaying] = useState(false);
-    const [viewMode, setViewMode] = useState<'split' | 'error'>('split');
     const [speed, setSpeed] = useState(1);
     
     const [errorBuffer, setErrorBuffer] = useState<Float32Array | null>(null);
@@ -100,9 +99,9 @@ export const ChaosAnalysis: React.FC = () => {
         return () => cancelAnimationFrame(req);
     }, [isPlaying, gtData, predData, speed]);
 
-    // Compute error buffer if in error mode
+    // Compute error buffer always so PIP window has data
     useEffect(() => {
-        if (viewMode === 'error' && gtData && predData) {
+        if (gtData && predData) {
             const maxLoaded = Math.min(gtData.framesLoaded, predData.framesLoaded);
             if (currentFrame < maxLoaded) {
                 const frameSize = gtData.width * gtData.height;
@@ -112,12 +111,12 @@ export const ChaosAnalysis: React.FC = () => {
                 
                 const err = new Float32Array(frameSize);
                 for (let i = 0; i < frameSize; i++) {
-                    err[i] = predFrame[i] - gtFrame[i];
+                    err[i] = Math.abs(predFrame[i] - gtFrame[i]); // Made it absolute error to look like heat map
                 }
                 setErrorBuffer(err);
             }
         }
-    }, [currentFrame, viewMode, gtData, predData]);
+    }, [currentFrame, gtData, predData]);
 
     const getFrameBuffer = (data: AnalysisData | null) => {
         if (!data || data.framesLoaded === 0) return null;
@@ -159,43 +158,56 @@ export const ChaosAnalysis: React.FC = () => {
                 </div>
             )}
 
-            {/* 3D Viewport Area */}
+            {/* Main Canvas for GT and Prediction Side-by-Side */}
             <div className="flex-1 flex w-full relative">
-                {viewMode === 'split' ? (
-                    <>
-                        <div className="flex-1 border-r border-zinc-800/50 relative">
-                            <div className="absolute top-4 left-4 z-10 px-3 py-1 bg-blue-500/20 text-blue-300 border border-blue-500/30 rounded backdrop-blur text-sm font-semibold tracking-wide">GROUND TRUTH</div>
-                            <Canvas camera={{ position: [0, -3, 4], fov: 45 }}>
-                                <ambientLight intensity={0.2} />
-                                <pointLight position={[10, 10, 10]} intensity={1} />
-                                <Stars radius={100} depth={50} count={2000} factor={4} saturation={0} fade speed={1} />
-                                <StaticTorus R={1.5} r={0.5} radialSegments={128} tubularSegments={128} res={128} frameData={getFrameBuffer(gtData)} />
-                                <OrbitControls autoRotate={isPlaying} autoRotateSpeed={0.2} />
-                            </Canvas>
+                <Canvas camera={{ position: [0, 0, 6], fov: 45 }}>
+                    <ambientLight intensity={0.2} />
+                    <pointLight position={[10, 10, 10]} intensity={1} />
+                    <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
+                    
+                    <group position={[-2.2, 0, 0]}>
+                        <StaticTorus R={1.5} r={0.5} radialSegments={128} tubularSegments={128} res={128} frameData={getFrameBuffer(gtData)} />
+                    </group>
+                    
+                    <group position={[2.2, 0, 0]}>
+                        <StaticTorus R={1.5} r={0.5} radialSegments={128} tubularSegments={128} res={128} frameData={getFrameBuffer(predData)} />
+                    </group>
+                    
+                    <OrbitControls autoRotate={isPlaying} autoRotateSpeed={0.2} enablePan={false} maxDistance={12} minDistance={3} />
+                </Canvas>
+
+                {/* Overlay Labels */}
+                <div className="absolute top-8 left-[20%] -translate-x-1/2 pointer-events-none">
+                    <div className="bg-black/40 backdrop-blur border border-zinc-800 rounded-lg px-4 py-2 text-center shadow-2xl">
+                        <h3 className="text-white font-semibold text-lg drop-shadow-md">Ground Truth</h3>
+                        <p className="text-blue-400 text-xs mt-1">Target Trajectory</p>
+                    </div>
+                </div>
+
+                <div className="absolute top-8 left-[80%] -translate-x-1/2 pointer-events-none">
+                    <div className="bg-black/40 backdrop-blur border border-zinc-800 rounded-lg px-4 py-2 text-center shadow-2xl">
+                        <h3 className="text-white font-semibold text-lg drop-shadow-md">GeoFNO Prediction</h3>
+                        <p className="text-emerald-400 text-xs mt-1">Inferred Trajectory</p>
+                    </div>
+                </div>
+
+                {/* Error Inset Picture-in-Picture */}
+                <div className="absolute bottom-8 right-8 w-64 h-64 bg-zinc-950/80 backdrop-blur-xl border border-zinc-700 rounded-2xl shadow-[0_0_40px_rgba(255,0,0,0.1)] overflow-hidden flex flex-col z-30">
+                    <div className="bg-zinc-900/90 border-b border-zinc-700 px-3 py-2 flex justify-between items-center z-10 pointer-events-none">
+                        <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">Absolute Error</span>
+                        <div className="flex gap-1">
+                            <div className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></div>
                         </div>
-                        <div className="flex-1 relative">
-                            <div className="absolute top-4 left-4 z-10 px-3 py-1 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded backdrop-blur text-sm font-semibold tracking-wide">PREDICTION</div>
-                            <Canvas camera={{ position: [0, -3, 4], fov: 45 }}>
-                                <ambientLight intensity={0.2} />
-                                <pointLight position={[10, 10, 10]} intensity={1} />
-                                <Stars radius={100} depth={50} count={2000} factor={4} saturation={0} fade speed={1} />
-                                <StaticTorus R={1.5} r={0.5} radialSegments={128} tubularSegments={128} res={128} frameData={getFrameBuffer(predData)} />
-                                <OrbitControls autoRotate={isPlaying} autoRotateSpeed={0.2} />
-                            </Canvas>
-                        </div>
-                    </>
-                ) : (
+                    </div>
                     <div className="flex-1 relative">
-                        <div className="absolute top-4 left-4 z-10 px-3 py-1 bg-rose-500/20 text-rose-300 border border-rose-500/30 rounded backdrop-blur text-sm font-semibold tracking-wide">PREDICTION ERROR MAP</div>
-                        <Canvas camera={{ position: [0, -3, 4], fov: 45 }}>
+                        <Canvas camera={{ position: [0, -3, 3], fov: 45 }}>
                             <ambientLight intensity={0.2} />
                             <pointLight position={[10, 10, 10]} intensity={1} />
-                            <Stars radius={100} depth={50} count={2000} factor={4} saturation={0} fade speed={1} />
                             <StaticTorus R={1.5} r={0.5} radialSegments={128} tubularSegments={128} res={128} frameData={errorBuffer} colorMap="error" intensityMultiplier={2.0} />
-                            <OrbitControls autoRotate={isPlaying} autoRotateSpeed={0.2} />
+                            <OrbitControls enablePan={false} enableZoom={false} autoRotate autoRotateSpeed={2.0} />
                         </Canvas>
                     </div>
-                )}
+                </div>
             </div>
 
             {/* Timeline UI Panel */}
@@ -245,23 +257,6 @@ export const ChaosAnalysis: React.FC = () => {
                                 {s}x
                             </button>
                         ))}
-                    </div>
-
-                    <div className="w-px h-8 bg-zinc-800 mx-2"></div>
-
-                    <div className="flex gap-2 bg-zinc-900 rounded-lg p-1 border border-zinc-800">
-                        <button 
-                            onClick={() => setViewMode('split')}
-                            className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${viewMode === 'split' ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
-                        >
-                            Split Compare
-                        </button>
-                        <button 
-                            onClick={() => setViewMode('error')}
-                            className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${viewMode === 'error' ? 'bg-rose-500/20 text-rose-300' : 'text-zinc-500 hover:text-zinc-300'}`}
-                        >
-                            Error Map
-                        </button>
                     </div>
                 </div>
             </div>
