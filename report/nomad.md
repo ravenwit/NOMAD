@@ -147,6 +147,9 @@ $$ (K * P)_{i,j} = \sum_{u} \sum_{v} K_{u,v} P_{(i-u) \bmod N_\theta, (j-v) \bmo
 
 **Failure Mode:** While topologically correct, the CNN kernels $K$ are strictly translation-invariant. The local physical wave-speed $v(\theta) = c\sqrt{g^{ij}}$ is inhomogeneous. A standard U-Net fundamentally cannot apply different functional mapping logic to different geographic areas of the manifold.
 
+![Periodic U-Net Loss](figures/loss_periodicunet.png)
+*Figure: Loss for the Periodic U-Net baseline, demonstrating its inability to generalize effectively.*
+
 ### 4.2 Vanilla Fourier Neural Operator (FNO)
 
 The FNO learns a continuous integral operator update $v^{(l+1)}(\mathbf{x}) = \sigma\left( W v^{(l)}(\mathbf{x}) + \int_{\mathcal{D}} \kappa(\mathbf{x}, \mathbf{y}) v^{(l)}(\mathbf{y}) d\mathbf{y} \right)$. By assuming a translation-invariant kernel $\kappa(\mathbf{x}, \mathbf{y}) = \kappa(\mathbf{x} - \mathbf{y})$, the integral simplifies to a convolution in Fourier space:
@@ -156,6 +159,9 @@ $$ \int_{\mathcal{D}} \kappa(\mathbf{x}-\mathbf{y}) v^{(l)}(\mathbf{y}) d\mathbf
 Where $R_\phi$ is a learned complex weight tensor truncating the Fourier series to a finite mode limit. 
 
 **Failure Mode:** Because the true physical propagation kernel on a Torus is structurally dependent on the heterogeneous distance metric $\sqrt{|g|}$, the assumption $\kappa(\mathbf{x}, \mathbf{y}) = \kappa(\mathbf{x} - \mathbf{y})$ is violently violated. The FNO memorizes Euclidean topologies but generalizes extremely poorly to metric deformations.
+
+![Vanilla FNO 2D Loss](figures/loss_fno2d.png)
+*Figure: Loss trajectory for the vanilla 2D FNO baseline, reflecting its struggle with metric deformations.*
 
 ### 4.3 Tensor Contraction and ONNX Compatibility
 
@@ -182,6 +188,75 @@ The Geo-FNO mechanism proceeds in four stages:
 
 ![Latent Grid](figures/fig5_latent_grid.png)
 *Figure 6: The learned latent coordinate grid $\varphi(\mathbf{x})$. The network learns to "unwrap" and distort the parameterization space specifically to flatten the variations caused by the toroidal metric determinant.*
+
+### 5.1 Geo-FNO Architecture Details (Big Model)
+
+The following diagram illustrates the structural inspection of our primary trained model checkpoint (`best_geofno_resumed.pt`), corresponding to the **Big Model** capacity (24 Fourier modes, 128 width).
+
+```text
+=====================================================================================
+🔍 INSPECTING CHECKPOINT: ./best_geofno_resumed.pt
+=====================================================================================
+
+[1. TOP-LEVEL KEYS]
+Keys found: ['project', 'epoch', 'model_state_dict', 'optimizer_state_dict', 'scaler_state_dict', 'history', 'best_val_loss', 'dataset_configuration']
+
+[2. EMBEDDED METADATA]
+  ├─ Project ID: CHORUS_Operator_Mapping
+  ├─ Saved at Epoch: 63
+  ├─ Best Validation Loss: 0.000001
+  ├─ Dataset Configuration:
+  │    ├─ project: CHORUS_Acoustic_Surrogate
+  │    ├─ t_in: 3
+  │    ├─ t_out: 30
+  │    ├─ N_theta: 64
+  │    ├─ N_phi: 64
+  │    ├─ R: 3.0
+  │    ├─ r: 1.0
+
+[3. MODEL ARCHITECTURE & WEIGHT TENSORS]
+-------------------------------------------------------------------------------------
+Layer Name                                    | Tensor Shape         | Parameters
+-------------------------------------------------------------------------------------
+base_grid                                     | [1, 64, 64, 2]       | 8,192
+fno.fc0.weight                                | [128, 9]             | 1,152
+fno.fc0.bias                                  | [128]                | 128
+fno.convs.0.weights1                          | [128, 128, 24, 24, 2] | 18,874,368
+fno.convs.0.weights2                          | [128, 128, 24, 24, 2] | 18,874,368
+fno.convs.1.weights1                          | [128, 128, 24, 24, 2] | 18,874,368
+fno.convs.1.weights2                          | [128, 128, 24, 24, 2] | 18,874,368
+fno.convs.2.weights1                          | [128, 128, 24, 24, 2] | 18,874,368
+fno.convs.2.weights2                          | [128, 128, 24, 24, 2] | 18,874,368
+fno.convs.3.weights1                          | [128, 128, 24, 24, 2] | 18,874,368
+fno.convs.3.weights2                          | [128, 128, 24, 24, 2] | 18,874,368
+fno.ws.0.weight                               | [128, 128, 1, 1]     | 16,384
+fno.ws.0.bias                                 | [128]                | 128
+fno.ws.1.weight                               | [128, 128, 1, 1]     | 16,384
+fno.ws.1.bias                                 | [128]                | 128
+fno.ws.2.weight                               | [128, 128, 1, 1]     | 16,384
+fno.ws.2.bias                                 | [128]                | 128
+fno.ws.3.weight                               | [128, 128, 1, 1]     | 16,384
+fno.ws.3.bias                                 | [128]                | 128
+fno.fc1.weight                                | [128, 128]           | 16,384
+fno.fc1.bias                                  | [128]                | 128
+fno.fc2.weight                                | [30, 128]            | 3,840
+fno.fc2.bias                                  | [30]                 | 30
+geo_net.net.0.weight                          | [32, 3, 1, 1]        | 96
+geo_net.net.0.bias                            | [32]                 | 32
+geo_net.net.2.weight                          | [32, 32, 1, 1]       | 1,024
+geo_net.net.2.bias                            | [32]                 | 32
+geo_net.net.4.weight                          | [2, 32, 1, 1]        | 64
+geo_net.net.4.bias                            | [2]                  | 2
+-------------------------------------------------------------------------------------
+TOTAL LEARNABLE PARAMETERS : 151,092,096
+BARE MODEL SIZE (FP32)     : 576.37 MB
+
+[4. TRAINING STATES (For Resumption)]
+  ├─ Optimizer State     : [DETECTED]
+  ├─ Last Learning Rate  : 0.0005707511315049062
+  └─ AMP Scaler State    : [DETECTED]
+=====================================================================================
+```
 
 ---
 
